@@ -19,7 +19,7 @@ def create_data(n_classes, min_points_per_class,
         # Create the points for the class
         n_points = np.random.randint(min_points_per_class,
                                      max_points_per_class)
-        mu = np.random.rand(n_features) * 2 - 1  # random vector in [-1,1]
+        mu = np.random.rand(n_features) * 2000 - 1000 # random vector in [-2000,2000]
         sigma = np.ones(n_features) * (np.random.rand() + 1) * SD  # random vector in [0,2]
         to_add_x = np.random.normal(mu, sigma, (n_points, n_features))
         to_add_y = np.ones(n_points) * i
@@ -54,7 +54,7 @@ if __name__ == '__main__':
     min_points_per_class = 5
     max_points_per_class = 40
     n_relevant_features = 20
-    n_false_feature = 150
+    n_false_feature = 500
     SD = 1 / 100
     X, y = create_data(n_classes, min_points_per_class,
                        max_points_per_class, n_relevant_features, n_false_feature, SD)
