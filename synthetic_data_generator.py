@@ -3,7 +3,7 @@ import numpy as np
 
 
 def create_data(n_classes, min_points_per_class,
-                max_points_per_class, n_relevant_features, n_false_feature, SD):
+                max_points_per_class, n_relevant_features, n_false_feature, initial_mu, SD):
     """Create a synthetic dataset with n_classes classes.
     Each class has a number of points between min_points_per_class
     and max_points_per_class.
@@ -19,7 +19,7 @@ def create_data(n_classes, min_points_per_class,
         # Create the points for the class
         n_points = np.random.randint(min_points_per_class,
                                      max_points_per_class)
-        mu = np.random.rand(n_features) * 2000 - 1000 # random vector in [-2000,2000]
+        mu = np.random.rand(n_features) * (2 * initial_mu) - initial_mu  # random vector in [-2000,2000]
         sigma = np.ones(n_features) * (np.random.rand() + 1) * SD  # random vector in [0,2]
         to_add_x = np.random.normal(mu, sigma, (n_points, n_features))
         to_add_y = np.ones(n_points) * i
@@ -32,9 +32,13 @@ def create_data(n_classes, min_points_per_class,
             y = to_add_y
 
     # Random permutation of false features
-    for feature_index in range(n_relevant_features + 1, n_features):
+    for feature_index in range(n_relevant_features, n_features):
         X[:, feature_index] = np.random.permutation(X[:, feature_index])
-
+    # x_mean = X - X.mean(axis=0)
+    # good = x_mean[:, 0] * x_mean[:, 1]
+    # bad = x_mean[:, 0] * x_mean[:, 2]
+    # print('good is better than bad by ', len(list(filter(lambda x: x, good > bad))) / len(good))
+    # exit()
     return X, y
 
 
@@ -49,14 +53,26 @@ def save_data(X, y):
     np.save('.//data//y.npy', y)
 
 
-if __name__ == '__main__':
+def main():
     n_classes = 10
-    min_points_per_class = 5
-    max_points_per_class = 40
+    min_points_per_class = 100
+    max_points_per_class = 200
     n_relevant_features = 20
-    n_false_feature = 500
-    SD = 1 / 100
+    n_false_feature = 2
+    mu = 1
+    SD = 0.01
+    seed = 42
+    np.random.seed(seed)
+    print('Creating data')
+    print(
+        'Initial params are : n_classes = {}, min_points_per_class = {}, max_points_per_class = {}, n_relevant_features = {}, n_false_feature = {}, mu = {}, SD = {}'
+        .format(n_classes, min_points_per_class, max_points_per_class, n_relevant_features, n_false_feature, mu, SD))
     X, y = create_data(n_classes, min_points_per_class,
-                       max_points_per_class, n_relevant_features, n_false_feature, SD)
-    save_data(X, y)
-    exit()
+                       max_points_per_class, n_relevant_features, n_false_feature, mu, SD)
+    metadata = {'n_classes': n_classes,
+                'min_points_per_class': min_points_per_class,
+                'max_points_per_class': max_points_per_class,
+                'n_relevant_features': n_relevant_features,
+                'n_false_feature': n_false_feature,
+                'SD': SD}
+    return X, y, metadata
