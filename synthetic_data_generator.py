@@ -1,5 +1,6 @@
 import matplotlib.pyplot as plt
 import numpy as np
+import torch
 
 
 def create_data(n_classes, min_points_per_class,
@@ -34,11 +35,6 @@ def create_data(n_classes, min_points_per_class,
     # Random permutation of false features
     for feature_index in range(n_relevant_features, n_features):
         X[:, feature_index] = np.random.permutation(X[:, feature_index])
-    # x_mean = X - X.mean(axis=0)
-    # good = x_mean[:, 0] * x_mean[:, 1]
-    # bad = x_mean[:, 0] * x_mean[:, 2]
-    # print('good is better than bad by ', len(list(filter(lambda x: x, good > bad))) / len(good))
-    # exit()
     return X, y
 
 
@@ -53,14 +49,14 @@ def save_data(X, y):
     np.save('.//data//y.npy', y)
 
 
-def main():
-    n_classes = 5
-    min_points_per_class = 40
-    max_points_per_class = 100
-    n_relevant_features = 3
-    n_false_feature = 3
+def get_synthetic_dataset():
+    n_classes = 8
+    min_points_per_class = 100
+    max_points_per_class = 200
+    n_relevant_features = 40
+    n_false_feature = 200
     mu = 1
-    SD = 0.01
+    SD = 0.7
     seed = 42
     np.random.seed(seed)
     print('Creating data')
@@ -75,4 +71,4 @@ def main():
                 'n_relevant_features': n_relevant_features,
                 'n_false_feature': n_false_feature,
                 'SD': SD}
-    return X, y, metadata
+    return torch.from_numpy(X).float(), torch.from_numpy(y), 'Synthetic Dataset', metadata
