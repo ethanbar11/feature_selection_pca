@@ -54,11 +54,11 @@ def save_data(X, y):
 
 
 def main():
-    n_classes = 10
-    min_points_per_class = 100
-    max_points_per_class = 200
-    n_relevant_features = 20
-    n_false_feature = 2
+    n_classes = 5
+    min_points_per_class = 40
+    max_points_per_class = 100
+    n_relevant_features = 3
+    n_false_feature = 3
     mu = 1
     SD = 0.01
     seed = 42
