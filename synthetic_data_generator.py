@@ -49,26 +49,30 @@ def save_data(X, y):
     np.save('.//data//y.npy', y)
 
 
-def get_synthetic_dataset():
-    n_classes = 6
-    min_points_per_class = 100
-    max_points_per_class = 200
-    n_relevant_features = 40
-    n_false_feature = 200
-    mu = 1
-    SD = 0.01
-    seed = 42
-    np.random.seed(seed)
-    print('Creating data')
-    print(
-        'Initial params are : n_classes = {}, min_points_per_class = {}, max_points_per_class = {}, n_relevant_features = {}, n_false_feature = {}, mu = {}, SD = {}'
-        .format(n_classes, min_points_per_class, max_points_per_class, n_relevant_features, n_false_feature, mu, SD))
-    X, y = create_data(n_classes, min_points_per_class,
-                       max_points_per_class, n_relevant_features, n_false_feature, mu, SD)
-    metadata = {'n_classes': n_classes,
-                'min_points_per_class': min_points_per_class,
-                'max_points_per_class': max_points_per_class,
-                'n_relevant_features': n_relevant_features,
-                'n_false_feature': n_false_feature,
-                'SD': SD}
-    return torch.from_numpy(X).float(), torch.from_numpy(y), 'Synthetic Dataset', metadata
+def get_synthetic_dataset(seed=42, times=1):
+    for i in range(times):
+        np.random.seed(seed + i)
+        n_classes = np.random.randint(2, 8)
+        min_points_per_class = 150
+        max_points_per_class = 250
+        n_relevant_features = np.random.randint(5, 100)
+        n_false_feature = np.random.randint(30, 400)
+        n_false_feature = 200
+        mu = 1
+        SD = np.random.randint(1, 10) * 0.01
+        # print('Creating data')
+        # print(
+        #     'Initial params are : n_classes = {}, min_points_per_class = {}, max_points_per_class = {}, n_relevant_features = {}, n_false_feature = {}, mu = {}, SD = {}'
+        #     .format(n_classes, min_points_per_class, max_points_per_class, n_relevant_features, n_false_feature, mu,
+        #             SD))
+        X, y = create_data(n_classes, min_points_per_class,
+                           max_points_per_class, n_relevant_features, n_false_feature, mu, SD)
+        metadata = {'n_classes': n_classes,
+                    'dataset_size': X.shape[0],
+                    'min_points_per_class': min_points_per_class,
+                    'max_points_per_class': max_points_per_class,
+                    'n_relevant_features': n_relevant_features,
+                    'n_false_feature': n_false_feature,
+                    'mu': mu,
+                    'SD': SD}
+        yield torch.from_numpy(X).float(), torch.from_numpy(y), 'Synthetic Dataset seed {}'.format(seed + i), metadata

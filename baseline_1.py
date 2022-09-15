@@ -11,6 +11,7 @@ import sklearn.cluster
 from sklearn.metrics.cluster import normalized_mutual_info_score
 
 import datasets
+import synthetic_data_generator
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 
@@ -68,38 +69,36 @@ def calculate_compression_w(u, v, P, w):
 
 
 class Optimizer:
-    def __init__(self, B, C, P, use_loss_B=False, use_normalization=False, use_clamping=True, valid_features=None):
-        self.use_loss_B = use_loss_B
-        self.use_normalization = use_normalization
-        self.use_clamping = use_clamping
-        self.valid_features = valid_features
+    def __init__(self, B, C, **kwargs):
+        self.use_loss_B = kwargs['use_loss_B']
+        self.use_normalization = kwargs['use_normalization']
+        self.use_clamping = kwargs['use_clamping'] if 'use_clamping' in kwargs else True
+        self.valid_features = kwargs['valid_features']
         self.BATCH_SIZE = int(1e4)
         self.LEARNING_RATE = 0.05
-        self.EPOCHS = 1
-        self.P = P
-        self.B = B
-        self.C = C
-        self.B_batches = torch.split(B, self.BATCH_SIZE, dim=0)
-        self.C_batches = torch.split(C, self.BATCH_SIZE, dim=0)
-        self.set_vals(B, C, P)
+        self.norm = kwargs['norm']
+        self.results_handler = kwargs['results_handler']
+        self.set_vals(B, C, np.zeros((1, 1)))
+
         log_debug("Starting to train w. Number of batches: ", len(self.B_batches))
         self.w = torch.ones((B.shape[-1]), requires_grad=True)
         self.current_loss_value = None
         self.optimizer = torch.optim.SGD(params=[self.w], lr=self.LEARNING_RATE)
 
+    # You have to call for set_vals before using.
     def set_vals(self, B, C, P):
-        # self.B = B
-        # self.C = C
-        # self.P = P
+        self.B = B
+        self.C = C
+        self.P = P
         self.B_batches = torch.split(B, self.BATCH_SIZE, dim=0)
         self.C_batches = torch.split(C, self.BATCH_SIZE, dim=0)
 
-    def optimize_w(self):
+    def optimize_w(self, epochs):
         # B is a matrix of size (chi * n**2 , d)
         # w is a vector of size (d, 1)
         # P is a matrix of size (k, d)
         # Split B into batches of rows
-        for epoch in range(self.EPOCHS):
+        for epoch in range(epochs):
 
             for batch_b, batch_c in zip(self.B_batches, self.C_batches):
                 # Calculating the gradient of the loss function
@@ -122,7 +121,7 @@ class Optimizer:
                 self.optimizer.step()
                 if self.use_normalization:
                     # Normalization of 2 order
-                    self.w.data = self.w.data / torch.linalg.norm(self.w.data, ord=1)
+                    self.w.data = self.w.data / torch.linalg.norm(self.w.data, ord=self.norm)
                     # Softmax normalization
                     # self.w.data = torch.nn.functional.softmax(self.w.data, dim=0)
                 if self.use_clamping:
@@ -130,52 +129,39 @@ class Optimizer:
         return self.w.detach()
 
     def print_status(self, epoch):
-        log_info("Epoch: ", epoch, " Loss: ", self.current_loss_value)
+        log_debug("Epoch: ", epoch, " Loss: ", self.current_loss_value)
         if self.valid_features is not None:
             biggest_weight_indices = torch.argsort(self.w, descending=True)[:len(self.valid_features)]
             combined = torch.cat((biggest_weight_indices, self.valid_features))
             uniques, counts = combined.unique(return_counts=True)
             intersection = uniques[counts > 1]
             w_accuracy = len(intersection) / len(self.valid_features)
-            log_info("W accuracy: ", w_accuracy)
+            log_debug("W accuracy: ", w_accuracy)
+            self.results_handler.add_result('loss', self.current_loss_value)
+            self.results_handler.add_result('w_accuracy', w_accuracy)
+            return w_accuracy
             # log_debug('Weights : ', self.w)
 
 
 class PCAFeatureExtraction(FeatureExtractionAlgorithm):
-    def __init__(self, n_components, fake_groups=False, database_name=None, use_loss_B=False,
-                 use_normalization=False, **kwargs):
+    def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.w_optimizer = None
-        self.n_components = n_components
-        self.xi = 0.01  # between [0,1], size of B out of n^2 pairs
+        self.n_components = kwargs['n_components']
+        self.xi = kwargs['xi']
         self.sorted_indices = None
-        self.fake_groups = fake_groups
-        self.database_name = database_name
-        self.use_loss_B = use_loss_B
-        self.use_normalization = use_normalization
+        self.use_loss_B = kwargs['use_loss_B']
+        self.use_normalization = kwargs['use_normalization']
+        self.norm = kwargs['norm']
+        self.iterative = kwargs['iterative']
+        self.epochs = kwargs['epochs']
+        self.results_handler = kwargs['results_handler']
+        self.args = kwargs
 
     def get_relevant_features(self, X, amount=10):
         return self.sorted_indices[:amount]
 
-    def calculate_optimal_n_components(self, X, y):
-        return self.n_components
-        table = []
-        for n_components in range(1, 2):
-            pca = sklearn.decomposition.PCA(n_components=n_components)
-
-            pca.fit(X)
-            P = torch.from_numpy(pca.components_).float()  # Should be sized (n_components, n_features)
-            log_debug('n_components: ', n_components)
-            b_precent, c_precent, b_mean, c_mean = self.calculate_B_C(P, X, y)
-            table.append([n_components, b_precent, c_precent, b_mean, c_mean])
-        table = np.array(table)
-        log_debug('Saving table')
-        log_debug(table)
-        np.savetxt('table.csv', table, delimiter=',')
-        exit()
-
-    def train(self, X, y=None, metadata=None):
-        self.calculate_optimal_n_components(X, y)
+    def train(self, X, y=None, metadata=None, epochs=1):
         log_debug('Starting training on PCAFeatureExtraction')
         # First stage - create all pairs of vectors
 
@@ -189,41 +175,63 @@ class PCAFeatureExtraction(FeatureExtractionAlgorithm):
         log_debug('Finished calculating PCA')
 
         log_debug('Calculating B')
-        if not self.fake_groups:
-            B, C = self.calculate_B_C(P, X, y)
-        else:
-            B, C = self.calculate_B_C_fake_groups(X, y)
+        B, C = self.calculate_B_C(P, X, y)
         log_debug('Finished calculating B, starting to calculate w')
         # Third stage - create w and Perform SGD on w where the loss
         # is -1 * mean(compressibility of batch)
 
-        valid_features = None
-        if metadata:
-            valid_features = torch.arange(metadata['n_relevant_features'])
-        if not self.w_optimizer:
-            self.w_optimizer = Optimizer(B, C, P, use_loss_B=self.use_loss_B, use_normalization=self.use_normalization,
-                                         valid_features=valid_features)
         self.w_optimizer.set_vals(B, C, P)
-        w = self.w_optimizer.optimize_w()
+        w = self.w_optimizer.optimize_w(epochs)
 
         # Fourth stage - save w
         self.sorted_indices = torch.argsort(w, descending=True)
         return w.data
 
-    def iterative_train(self, X, y=None, metadata=None):
-        # Calculates C each time and updates w
-        EPOCHS = 100
-        # First train
-        self.train(X, y, metadata)
-        self.w_optimizer.EPOCHS = 1
-        original_X = X.clone()
-        for epoch in range(EPOCHS - 1):
-            w = self.train(X, y, metadata)
-            # Perform softmax on weights
-            X = w * original_X
+    def train_wrapper(self, X, y=None, metadata=None):
+        fake_B = torch.ones((1, 2, X.shape[1]))
+        valid_features = metadata['n_relevant_features'] if 'n_relevant_features' in metadata else None
+        if valid_features:
+            valid_features = torch.arange(valid_features)
+        self.w_optimizer = Optimizer(fake_B, fake_B, valid_features=valid_features, **self.args)
+        if self.iterative:
+            original_X = X.clone()
+            for i in range(self.epochs):
+                w = self.train(X, y, metadata, epochs=1)
+                X = w * original_X
+                self.w_optimizer.print_status(i)
+        else:
+            self.train(X, y, metadata, epochs=self.epochs)
+            self.w_optimizer.print_status(self.epochs)
 
-            # print(w)
-            self.w_optimizer.print_status(epoch)
+    # def only_train(self, X, y=None, metadata=None):
+    #     self.train(X, y, metadata)
+    #     results = {'starting_b': self.current_b_precent, 'starting_c': self.current_c_precent}
+    #     self.w_optimizer.EPOCHS = 99
+    #     w_accuracy = self.w_optimizer.print_status(100)
+    #     results['ending_b'] = self.current_b_precent
+    #     results['ending_c'] = self.current_c_precent
+    #     results['w'] = w_accuracy
+    #     return results
+    #
+    # def iterative_train(self, X, y=None, metadata=None):
+    #     # Calculates C each time and updates w
+    #     # First train
+    #     EPOCHS = 100
+    #     self.train(X, y, metadata)
+    #     self.w_optimizer.EPOCHS = 1
+    #     results = {'starting_b': self.current_b_precent, 'starting_c': self.current_c_precent}
+    #     original_X = X.clone()
+    #     for epoch in range(EPOCHS - 1):
+    #         w = self.train(X, y, metadata)
+    #         # Perform softmax on weights
+    #         X = w * original_X
+    #
+    #         # print(w)
+    #         w_accuracy = self.w_optimizer.print_status(epoch)
+    #     results['ending_b'] = self.current_b_precent
+    #     results['ending_c'] = self.current_c_precent
+    #     results['w'] = w_accuracy
+    #     return results
 
     def calculate_B_C(self, P, X, y):
         X = torch.unique(X, dim=0)
@@ -245,13 +253,13 @@ class PCAFeatureExtraction(FeatureExtractionAlgorithm):
 
         b_precent = torch.sum(y[left_indices[B_indices]] == y[right_indices[B_indices]]) / groups_size
         c_precent = torch.sum(y[left_indices[C_indices]] == y[right_indices[C_indices]]) / groups_size
-        log_info('Same group precentage in B is {}'.format(b_precent))
-        log_info('Same group precentage in C is {}'.format(c_precent))
 
-        log_debug('Average grade in B is {}'.format(torch.mean(B_grades)))
-        b_mean = torch.mean(B_grades)
-        log_debug('Average grade in C is {}'.format(torch.mean(C_grades)))
-        c_mean = torch.mean(C_grades)
+        self.results_handler.add_result('b_precent', b_precent)
+        self.results_handler.add_result('c_precent', c_precent)
+
+        log_debug('Same group precentage in B is {}'.format(b_precent))
+        log_debug('Same group precentage in C is {}'.format(c_precent))
+
         return B, C
 
     def calculate_B_C_fake_groups(self, X, y):
@@ -326,7 +334,54 @@ def run_algo(algo, X, y, seed=42, feature_amount=None):
     return torch.mean(torch.tensor(accuracies))
 
 
+def run_synthetic_experiment():
+    n_components = 5
+    times = 1
+    seed = 42
+    torch.manual_seed(seed)
+    results = []
+    names = ['L1', 'L2', 'No_norm']
+    for i in range(times):
+        X, y, name, metadata = synthetic_data_generator.get_synthetic_dataset(seed + i)
+        first_algo = PCAFeatureExtraction(n_components=n_components, use_normalization=True, use_loss_B=False, norm=1)
+        second_algo = PCAFeatureExtraction(n_components=n_components, use_normalization=True, use_loss_B=False, norm=2)
+        third_algo = PCAFeatureExtraction(n_components=n_components, use_normalization=False, use_loss_B=False)
+        # algos = [first_algo, second_algo, third_algo]
+        # for algo, name in zip(algos, names):
+        #     print('Testing vs metadata', metadata)
+        #     result =algo.only_train(X, y, metadata)
+        #     result['metadata'] = metadata
+        #     result['name'] = name
+        #     result['type'] = 'regular'
+        #     results.append(result)
+        #     print('Finished iteration {} with algo : {}'.format(i, name))
+        #     print(results[i])
+        #
+        # first_algo = PCAFeatureExtraction(n_components=n_components, use_normalization=True, use_loss_B=False, norm=1)
+        # second_algo = PCAFeatureExtraction(n_components=n_components, use_normalization=True, use_loss_B=False, norm=2)
+        # third_algo = PCAFeatureExtraction(n_components=n_components, use_normalization=False, use_loss_B=False)
+        # algos = [first_algo, second_algo, third_algo]
+
+        for algo, name in zip(algos, names):
+            print('Testing vs metadata', metadata)
+            result = algo.iterative_train(X, y, metadata)
+            result['metadata'] = metadata
+            result['name'] = name
+            result['type'] = 'iterative'
+            results.append(result)
+            print('Finished iteration {} with algo : {}'.format(i, name))
+            print(results[i])
+    print('Finished all iterations')
+    print(results)
+    # Saving results
+    with open('.//sync//results3.pickle', 'wb') as f:
+        import pickle
+        pickle.dump(results, f)
+
+
 if __name__ == '__main__':
+    run_synthetic_experiment()
+    exit()
     n_components = 5
     feature_amount = 100
     seed = 42
@@ -347,7 +402,7 @@ if __name__ == '__main__':
     # without_loss_B_without_normalization.use_loss_B = False
     # without_loss_B_without_normalization.use_normalization = False
 
-    algo = PCAFeatureExtraction(n_components,use_normalization=True,use_loss_B=False)
+    algo = PCAFeatureExtraction(n_components, use_normalization=True, use_loss_B=False)
 
     algos = [algo]
 
