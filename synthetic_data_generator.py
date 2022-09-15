@@ -50,13 +50,13 @@ def save_data(X, y):
 
 
 def get_synthetic_dataset():
-    n_classes = 8
+    n_classes = 30
     min_points_per_class = 100
     max_points_per_class = 200
     n_relevant_features = 40
     n_false_feature = 200
     mu = 1
-    SD = 0.7
+    SD = 0.01
     seed = 42
     np.random.seed(seed)
     print('Creating data')

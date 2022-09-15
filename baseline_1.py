@@ -50,72 +50,80 @@ def calculate_compression_w(u, v, P, w):
     return outcome
 
 
-def optimize_w(B, C, P, use_loss_B=False, use_normalization=False, use_clamping=True, valid_features=None):
-    # B is a matrix of size (chi * n**2 , d)
-    # w is a vector of size (d, 1)
-    # P is a matrix of size (k, d)
-    # Split B into batches of rows
+class Optimizer:
+    def __init__(self, B, C, P, use_loss_B=False, use_normalization=False, use_clamping=True, valid_features=None):
+        self.B = B
+        self.C = C
+        self.P = P
+        self.use_loss_B = use_loss_B
+        self.use_normalization = use_normalization
+        self.use_clamping = use_clamping
+        self.valid_features = valid_features
+        self.BATCH_SIZE = int(1e4)
+        self.LEARNING_RATE = 0.01
+        self.EPOCHS = 20
+        self.B_batches = torch.split(B, self.BATCH_SIZE, dim=0)
+        self.C_batches = torch.split(C, self.BATCH_SIZE, dim=0)
+        print("Starting to train w. Number of batches: ", len(self.B_batches))
+        self.w = torch.ones((B.shape[-1]), requires_grad=True)
+        self.loss = None
+        self.optimizer = torch.optim.SGD(params=[self.w], lr=self.LEARNING_RATE)
 
-    BATCH_SIZE = int(1e4)
-    LEARNING_RATE = 0.01
-    EPOCHS = 20
-    B_batches = torch.split(B, BATCH_SIZE, dim=0)
-    C_batches = torch.split(C, BATCH_SIZE, dim=0)
-    print("Starting to train w. Number of batches: ", len(B_batches))
-    w = torch.ones((B.shape[-1]), requires_grad=True)
-    loss = None
-    optimizer = torch.optim.SGD(params=[w], lr=LEARNING_RATE)
-    for epoch in range(EPOCHS):
+    def optimize_w(self):
+        # B is a matrix of size (chi * n**2 , d)
+        # w is a vector of size (d, 1)
+        # P is a matrix of size (k, d)
+        # Split B into batches of rows
 
-        # pca.fit(X * w.detach().numpy())
-        # P = torch.from_numpy(pca.components_)  # Should be sized (n_components, n_features)
+        for epoch in range(self.EPOCHS):
 
-        for batch_b, batch_c in zip(B_batches, C_batches):
-            # Calculating the gradient of the loss function
-            # with respect to w
-            optimizer.zero_grad()
+            for batch_b, batch_c in zip(self.B_batches, self.C_batches):
+                # Calculating the gradient of the loss function
+                # with respect to w
+                self.optimizer.zero_grad()
 
-            u = batch_b[:, 0, :]
-            v = batch_b[:, 1, :]
-            u2 = batch_c[:, 0, :]
-            v2 = batch_c[:, 1, :]
+                u = batch_b[:, 0, :]
+                v = batch_b[:, 1, :]
+                u2 = batch_c[:, 0, :]
+                v2 = batch_c[:, 1, :]
 
-            loss_C = torch.mean(calculate_compression_w(u2, v2, P, w)) * (-1.0)
-            loss = loss_C
-            if use_loss_B:
-                loss_B = torch.mean(calculate_compression_w(u, v, P, w))
-                loss += loss_B
+                loss_C = torch.mean(calculate_compression_w(u2, v2, self.P, self.w)) * (-1.0)
+                loss = loss_C
+                if self.use_loss_B:
+                    loss_B = torch.mean(calculate_compression_w(u, v, self.P, self.w))
+                    loss += loss_B
 
-            loss.backward()
-            optimizer.step()
-            if use_normalization:
-                # Normalization of 1 order
-                w.data = w.data / torch.linalg.norm(w.data, ord=2)
-            if use_clamping:
-                w.data = torch.clamp(w.data, min=0.0, max=1.0)
-        if epoch % int(EPOCHS / 20) == 0:
-            print("Epoch: ", epoch, " Loss: ", loss.item())
-            if valid_features is not None:
-                biggest_weight_indices = torch.argsort(w, descending=True)[:len(valid_features)]
-                combined = torch.cat((biggest_weight_indices, valid_features))
-                uniques, counts = combined.unique(return_counts=True)
-                intersection = uniques[counts > 1]
-                w_accuracy = len(intersection) / len(valid_features)
-                print("W accuracy: ", w_accuracy)
-                print('Weights : ', w)
-    return w.detach()
+                loss.backward()
+                self.optimizer.step()
+                if self.use_normalization:
+                    # Normalization of 1 order
+                    self.w.data = self.w.data / torch.linalg.norm(self.w.data, ord=2)
+                if self.use_clamping:
+                    self.w.data = torch.clamp(self.w.data, min=0.0, max=1.0)
+            if epoch % int(self.EPOCHS / 20) == 0:
+                print("Epoch: ", epoch, " Loss: ", loss.item())
+                if self.valid_features is not None:
+                    biggest_weight_indices = torch.argsort(self.w, descending=True)[:len(self.valid_features)]
+                    combined = torch.cat((biggest_weight_indices, self.valid_features))
+                    uniques, counts = combined.unique(return_counts=True)
+                    intersection = uniques[counts > 1]
+                    w_accuracy = len(intersection) / len(self.valid_features)
+                    print("W accuracy: ", w_accuracy)
+                    # print('Weights : ', self.w)
+        return self.w.detach()
 
 
 class PCAFeatureExtraction(FeatureExtractionAlgorithm):
     def __init__(self, n_components, fake_groups=False, database_name=None, use_loss_B=False,
                  use_normalization=False, **kwargs):
         super().__init__(**kwargs)
+        self.w_optimizer = None
         self.n_components = n_components
-        self.xi = 0.01  # between [0,1], size of B out of n^2 pairs
+        self.xi = 0.001  # between [0,1], size of B out of n^2 pairs
         self.sorted_indices = None
         self.fake_groups = fake_groups
         self.database_name = database_name
-        self.use_loss_B = use_loss_B
+        self.use_loss_B = True
         self.use_normalization = use_normalization
 
     def get_relevant_features(self, X, amount=10):
@@ -164,7 +172,10 @@ class PCAFeatureExtraction(FeatureExtractionAlgorithm):
         valid_features = None
         if metadata:
             valid_features = torch.arange(metadata['n_relevant_features'])
-        w = optimize_w(B, C, P, self.use_loss_B, self.use_normalization, valid_features=valid_features)
+        if not self.w_optimizer:
+            self.w_optimizer = Optimizer(B, C, P, use_loss_B=self.use_loss_B, use_normalization=self.use_normalization,
+                                         valid_features=valid_features)
+        w = self.w_optimizer.optimize_w()
 
         # Fourth stage - save w
         self.sorted_indices = torch.argsort(w, descending=True)
@@ -172,7 +183,7 @@ class PCAFeatureExtraction(FeatureExtractionAlgorithm):
 
     def iterative_train(self, X, y=None, metadata=None):
         # Calculates C each time and updates w
-        EPOCHS = 100
+        EPOCHS = 1
         for epoch in range(EPOCHS):
             w = self.train(X, y, metadata)
             X = w * X
@@ -284,21 +295,23 @@ if __name__ == '__main__':
     torch.manual_seed(seed)
 
     algos = [Baseline()]
-    with_loss_B_with_normalization = PCAFeatureExtraction(n_components)
-    with_loss_B_with_normalization.use_loss_B = True
-    with_loss_B_with_normalization.use_normalization = True
-    without_loss_B_with_normalization = PCAFeatureExtraction(n_components)
-    without_loss_B_with_normalization.use_loss_B = False
-    without_loss_B_with_normalization.use_normalization = True
-    with_loss_B_without_normalization = PCAFeatureExtraction(n_components)
-    with_loss_B_without_normalization.use_loss_B = True
-    with_loss_B_without_normalization.use_normalization = False
+    # with_loss_B_with_normalization = PCAFeatureExtraction(n_components)
+    # with_loss_B_with_normalization.use_loss_B = True
+    # with_loss_B_with_normalization.use_normalization = True
+    # without_loss_B_with_normalization = PCAFeatureExtraction(n_components)
+    # without_loss_B_with_normalization.use_loss_B = False
+    # without_loss_B_with_normalization.use_normalization = True
+    # with_loss_B_without_normalization = PCAFeatureExtraction(n_components)
+    # with_loss_B_without_normalization.use_loss_B = True
+    # with_loss_B_without_normalization.use_normalization = False
+    #
+    # without_loss_B_without_normalization = PCAFeatureExtraction(n_components)
+    # without_loss_B_without_normalization.use_loss_B = False
+    # without_loss_B_without_normalization.use_normalization = False
 
-    without_loss_B_without_normalization = PCAFeatureExtraction(n_components)
-    without_loss_B_without_normalization.use_loss_B = False
-    without_loss_B_without_normalization.use_normalization = False
+    algo=PCAFeatureExtraction(1)
 
-    algos = [without_loss_B_with_normalization]
+    algos = [algo]
 
     # Defining params
     print('Starting to test algos : ', algos)
