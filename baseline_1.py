@@ -1,4 +1,6 @@
+from torch import autograd
 import os
+import logging
 
 import numpy as np
 import seaborn as sns
@@ -9,6 +11,21 @@ import sklearn.cluster
 from sklearn.metrics.cluster import normalized_mutual_info_score
 
 import datasets
+
+logging.basicConfig(level=logging.INFO, format='%(message)s')
+
+
+def log_info(*args):
+    logging.info(args_to_string(args))
+
+
+def log_debug(*args):
+    logging.debug(args_to_string(args))
+
+
+# Convert args to one string
+def args_to_string(args):
+    return ' '.join([str(arg) for arg in args])
 
 
 class FeatureExtractionAlgorithm:
@@ -52,29 +69,36 @@ def calculate_compression_w(u, v, P, w):
 
 class Optimizer:
     def __init__(self, B, C, P, use_loss_B=False, use_normalization=False, use_clamping=True, valid_features=None):
-        self.B = B
-        self.C = C
-        self.P = P
         self.use_loss_B = use_loss_B
         self.use_normalization = use_normalization
         self.use_clamping = use_clamping
         self.valid_features = valid_features
         self.BATCH_SIZE = int(1e4)
-        self.LEARNING_RATE = 0.01
-        self.EPOCHS = 20
+        self.LEARNING_RATE = 0.05
+        self.EPOCHS = 1
+        self.P = P
+        self.B = B
+        self.C = C
         self.B_batches = torch.split(B, self.BATCH_SIZE, dim=0)
         self.C_batches = torch.split(C, self.BATCH_SIZE, dim=0)
-        print("Starting to train w. Number of batches: ", len(self.B_batches))
+        self.set_vals(B, C, P)
+        log_debug("Starting to train w. Number of batches: ", len(self.B_batches))
         self.w = torch.ones((B.shape[-1]), requires_grad=True)
-        self.loss = None
+        self.current_loss_value = None
         self.optimizer = torch.optim.SGD(params=[self.w], lr=self.LEARNING_RATE)
+
+    def set_vals(self, B, C, P):
+        # self.B = B
+        # self.C = C
+        # self.P = P
+        self.B_batches = torch.split(B, self.BATCH_SIZE, dim=0)
+        self.C_batches = torch.split(C, self.BATCH_SIZE, dim=0)
 
     def optimize_w(self):
         # B is a matrix of size (chi * n**2 , d)
         # w is a vector of size (d, 1)
         # P is a matrix of size (k, d)
         # Split B into batches of rows
-
         for epoch in range(self.EPOCHS):
 
             for batch_b, batch_c in zip(self.B_batches, self.C_batches):
@@ -94,23 +118,27 @@ class Optimizer:
                     loss += loss_B
 
                 loss.backward()
+                self.current_loss_value = loss.item()
                 self.optimizer.step()
                 if self.use_normalization:
-                    # Normalization of 1 order
-                    self.w.data = self.w.data / torch.linalg.norm(self.w.data, ord=2)
+                    # Normalization of 2 order
+                    self.w.data = self.w.data / torch.linalg.norm(self.w.data, ord=1)
+                    # Softmax normalization
+                    # self.w.data = torch.nn.functional.softmax(self.w.data, dim=0)
                 if self.use_clamping:
                     self.w.data = torch.clamp(self.w.data, min=0.0, max=1.0)
-            if epoch % int(self.EPOCHS / 20) == 0:
-                print("Epoch: ", epoch, " Loss: ", loss.item())
-                if self.valid_features is not None:
-                    biggest_weight_indices = torch.argsort(self.w, descending=True)[:len(self.valid_features)]
-                    combined = torch.cat((biggest_weight_indices, self.valid_features))
-                    uniques, counts = combined.unique(return_counts=True)
-                    intersection = uniques[counts > 1]
-                    w_accuracy = len(intersection) / len(self.valid_features)
-                    print("W accuracy: ", w_accuracy)
-                    # print('Weights : ', self.w)
         return self.w.detach()
+
+    def print_status(self, epoch):
+        log_info("Epoch: ", epoch, " Loss: ", self.current_loss_value)
+        if self.valid_features is not None:
+            biggest_weight_indices = torch.argsort(self.w, descending=True)[:len(self.valid_features)]
+            combined = torch.cat((biggest_weight_indices, self.valid_features))
+            uniques, counts = combined.unique(return_counts=True)
+            intersection = uniques[counts > 1]
+            w_accuracy = len(intersection) / len(self.valid_features)
+            log_info("W accuracy: ", w_accuracy)
+            # log_debug('Weights : ', self.w)
 
 
 class PCAFeatureExtraction(FeatureExtractionAlgorithm):
@@ -119,11 +147,11 @@ class PCAFeatureExtraction(FeatureExtractionAlgorithm):
         super().__init__(**kwargs)
         self.w_optimizer = None
         self.n_components = n_components
-        self.xi = 0.001  # between [0,1], size of B out of n^2 pairs
+        self.xi = 0.01  # between [0,1], size of B out of n^2 pairs
         self.sorted_indices = None
         self.fake_groups = fake_groups
         self.database_name = database_name
-        self.use_loss_B = True
+        self.use_loss_B = use_loss_B
         self.use_normalization = use_normalization
 
     def get_relevant_features(self, X, amount=10):
@@ -137,35 +165,35 @@ class PCAFeatureExtraction(FeatureExtractionAlgorithm):
 
             pca.fit(X)
             P = torch.from_numpy(pca.components_).float()  # Should be sized (n_components, n_features)
-            print('n_components: ', n_components)
+            log_debug('n_components: ', n_components)
             b_precent, c_precent, b_mean, c_mean = self.calculate_B_C(P, X, y)
             table.append([n_components, b_precent, c_precent, b_mean, c_mean])
         table = np.array(table)
-        print('Saving table')
-        print(table)
+        log_debug('Saving table')
+        log_debug(table)
         np.savetxt('table.csv', table, delimiter=',')
         exit()
 
     def train(self, X, y=None, metadata=None):
         self.calculate_optimal_n_components(X, y)
-        print('Starting training on PCAFeatureExtraction')
+        log_debug('Starting training on PCAFeatureExtraction')
         # First stage - create all pairs of vectors
 
         # Second stage - For each pair - calculate compressibility ratio using PCA
-        print('Calculating PCA for matrix sized : ', X.shape)
-        # TODO: Check what Lior said with not needing to substract the mu
+        log_debug('Calculating PCA for matrix sized : ', X.shape)
+        # TODO: Check what Lior said with not needing to subtract the mu
         pca = sklearn.decomposition.PCA(n_components=self.n_components)
 
         pca.fit(X)
         P = torch.from_numpy(pca.components_).float()  # Should be sized (n_components, n_features)
-        print('Finished calculating PCA')
+        log_debug('Finished calculating PCA')
 
-        print('Calculating B')
+        log_debug('Calculating B')
         if not self.fake_groups:
             B, C = self.calculate_B_C(P, X, y)
         else:
             B, C = self.calculate_B_C_fake_groups(X, y)
-        print('Finished calculating B, starting to calculate w')
+        log_debug('Finished calculating B, starting to calculate w')
         # Third stage - create w and Perform SGD on w where the loss
         # is -1 * mean(compressibility of batch)
 
@@ -175,25 +203,34 @@ class PCAFeatureExtraction(FeatureExtractionAlgorithm):
         if not self.w_optimizer:
             self.w_optimizer = Optimizer(B, C, P, use_loss_B=self.use_loss_B, use_normalization=self.use_normalization,
                                          valid_features=valid_features)
+        self.w_optimizer.set_vals(B, C, P)
         w = self.w_optimizer.optimize_w()
 
         # Fourth stage - save w
         self.sorted_indices = torch.argsort(w, descending=True)
-        return w
+        return w.data
 
     def iterative_train(self, X, y=None, metadata=None):
         # Calculates C each time and updates w
-        EPOCHS = 1
-        for epoch in range(EPOCHS):
+        EPOCHS = 100
+        # First train
+        self.train(X, y, metadata)
+        self.w_optimizer.EPOCHS = 1
+        original_X = X.clone()
+        for epoch in range(EPOCHS - 1):
             w = self.train(X, y, metadata)
-            X = w * X
+            # Perform softmax on weights
+            X = w * original_X
+
+            # print(w)
+            self.w_optimizer.print_status(epoch)
 
     def calculate_B_C(self, P, X, y):
         X = torch.unique(X, dim=0)
         indices_pairs = self.get_pairs(X, X.shape[0], y)
         left_indices = indices_pairs[:, 0]
         right_indices = indices_pairs[:, 1]
-        print('Starting to calculate all grades')
+        log_debug('Starting to calculate all grades')
         u = X[left_indices]
         v = X[right_indices]
         grades = calculate_compression(u, v, P)
@@ -201,31 +238,31 @@ class PCAFeatureExtraction(FeatureExtractionAlgorithm):
         B_grades, B_indices = torch.topk(grades, groups_size, largest=False)
         C_grades, C_indices = torch.topk(grades, groups_size, largest=True)
 
-        print('Finished calculating all grades')
+        log_debug('Finished calculating all grades')
         # Still second - Create B - the group of top xi pairs according to measure
         B = torch.stack((u[B_indices], v[B_indices]), dim=1)
         C = torch.stack((u[C_indices], v[C_indices]), dim=1)
 
         b_precent = torch.sum(y[left_indices[B_indices]] == y[right_indices[B_indices]]) / groups_size
         c_precent = torch.sum(y[left_indices[C_indices]] == y[right_indices[C_indices]]) / groups_size
-        print('Same group precentage in B is {}'.format(b_precent))
-        print('Same group precentage in C is {}'.format(c_precent))
+        log_info('Same group precentage in B is {}'.format(b_precent))
+        log_info('Same group precentage in C is {}'.format(c_precent))
 
-        print('Average grade in B is {}'.format(torch.mean(B_grades)))
+        log_debug('Average grade in B is {}'.format(torch.mean(B_grades)))
         b_mean = torch.mean(B_grades)
-        print('Average grade in C is {}'.format(torch.mean(C_grades)))
+        log_debug('Average grade in C is {}'.format(torch.mean(C_grades)))
         c_mean = torch.mean(C_grades)
         return B, C
 
     def calculate_B_C_fake_groups(self, X, y):
         # Check if database file exists
         if self.database_name and os.path.exists(self.database_name):
-            print('Loading database from file')
+            log_debug('Loading database from file')
             B, C = torch.load(self.database_name)
             return B, C
 
         else:
-            print('Creating fake groups by myself...')
+            log_debug('Creating fake groups by myself...')
             n = X.shape[0]
             pairs, left_y, right_y = self.get_pairs(X, X.shape[0], y)
             # Validates I'm not taking from the same cluster
@@ -236,7 +273,8 @@ class PCAFeatureExtraction(FeatureExtractionAlgorithm):
             C = []
             for i in range(n ** 2):
                 if i % 100000 == 0:
-                    print('Finished {} pairs, B is {}%, C is {}%'.format(i, len(B) * 100 / size, len(C) * 100 / size))
+                    log_debug(
+                        'Finished {} pairs, B is {}%, C is {}%'.format(i, len(B) * 100 / size, len(C) * 100 / size))
                 same_class = left_y[i] == right_y[i]
                 equal_vectors = torch.equal(pairs[i][0], pairs[i][1])
                 if not equal_vectors:
@@ -249,14 +287,14 @@ class PCAFeatureExtraction(FeatureExtractionAlgorithm):
             B = torch.stack(B, dim=0)
             C = torch.stack(C, dim=0)
             if self.database_name:
-                print('Saving database to file', self.database_name)
+                log_debug('Saving database to file', self.database_name)
                 torch.save((B, C), self.database_name)
             return B, C
 
     def get_pairs(self, X, n, y):
 
         indices = torch.tensor([i for i in range(n)])
-        print('Using mashgrid to create all indices_pairs')
+        log_debug('Using mashgrid to create all indices_pairs')
         left_indices, right_indices = torch.meshgrid(indices, indices)
         left_indices = left_indices.flatten()
         right_indices = right_indices.flatten()
@@ -265,7 +303,7 @@ class PCAFeatureExtraction(FeatureExtractionAlgorithm):
         indices_pairs = indices_pairs[left_indices != right_indices]
         # indices_pairs = indices_pairs[torch.randperm(indices_pairs.shape[0])]
 
-        print('Finished. Some playing with indices.')
+        log_debug('Finished. Some playing with indices.')
 
         return indices_pairs
 
@@ -289,7 +327,7 @@ def run_algo(algo, X, y, seed=42, feature_amount=None):
 
 
 if __name__ == '__main__':
-    n_components = 3
+    n_components = 5
     feature_amount = 100
     seed = 42
     torch.manual_seed(seed)
@@ -309,30 +347,31 @@ if __name__ == '__main__':
     # without_loss_B_without_normalization.use_loss_B = False
     # without_loss_B_without_normalization.use_normalization = False
 
-    algo=PCAFeatureExtraction(1)
+    algo = PCAFeatureExtraction(n_components,use_normalization=True,use_loss_B=False)
 
     algos = [algo]
 
-    # Defining params
-    print('Starting to test algos : ', algos)
-    for X, y, name, metadata in datasets.read_datasets():
-        feature_jump = 10
-        print('Starting to test on dataset {}'.format(name))
-        print('X shape is {}'.format(X.shape))
-        for algo in algos:
-            print('Starting to test algo : ', algo)
-            algo.database_name = './/fake_b_c_datasets//{}.pt'.format(name)
-            print('Starting to test algo {} on dataset {}'.format(algo, name))
-            algo.iterative_train(X, y, metadata)
+    with autograd.detect_anomaly():
+        # Defining params
+        log_debug('Starting to test algos : ', algos)
+        for X, y, name, metadata in datasets.read_datasets():
+            feature_jump = 10
+            log_debug('Starting to test on dataset {}'.format(name))
+            log_debug('X shape is {}'.format(X.shape))
+            for algo in algos:
+                log_debug('Starting to test algo : ', algo)
+                algo.database_name = './/fake_b_c_datasets//{}.pt'.format(name)
+                log_debug('Starting to test algo {} on dataset {}'.format(algo, name))
+                algo.iterative_train(X, y, metadata)
             # amounts = [i for i in range(feature_jump, min(200, X.shape[-1]), feature_jump)]
             # results = []
             # for feature_amount in amounts:
             #     result = run_algo(algo, X, y, feature_amount=feature_amount)
             #     results.append(result)
             # results = torch.tensor(results)
-        #     print("\n\n==============")
-        #     print('Max result is {} in index {}'.format((torch.argmax(results) + 1) * 20, torch.max(results) * 100))
-        #     print("==============\n\n")
+        #     log_debug("\n\n==============")
+        #     log_debug('Max result is {} in index {}'.format((torch.argmax(results) + 1) * 20, torch.max(results) * 100))
+        #     log_debug("==============\n\n")
         #
         #     # Plotting results
         #     plt.plot(amounts, results, label=algo.__str__())

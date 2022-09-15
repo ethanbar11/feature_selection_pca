@@ -50,7 +50,7 @@ def save_data(X, y):
 
 
 def get_synthetic_dataset():
-    n_classes = 30
+    n_classes = 6
     min_points_per_class = 100
     max_points_per_class = 200
     n_relevant_features = 40
