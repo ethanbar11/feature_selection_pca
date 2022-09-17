@@ -75,11 +75,10 @@ class Optimizer:
         self.use_clamping = kwargs['use_clamping'] if 'use_clamping' in kwargs else True
         self.valid_features = kwargs['valid_features']
         self.BATCH_SIZE = int(1e4)
-        self.LEARNING_RATE = 0.05
+        self.LEARNING_RATE = kwargs['learning_rate']
         self.norm = kwargs['norm']
         self.results_handler = kwargs['results_handler']
         self.set_vals(B, C, np.zeros((1, 1)))
-
         log_debug("Starting to train w. Number of batches: ", len(self.B_batches))
         self.w = torch.ones((B.shape[-1]), requires_grad=True)
         self.current_loss_value = None
@@ -126,12 +125,15 @@ class Optimizer:
                     # self.w.data = torch.nn.functional.softmax(self.w.data, dim=0)
                 if self.use_clamping:
                     self.w.data = torch.clamp(self.w.data, min=0.0, max=1.0)
+                if epoch != 0:
+                    self.print_status()
         return self.w.detach()
 
-    def print_status(self, epoch):
-        log_debug("Epoch: ", epoch, " Loss: ", self.current_loss_value)
+    def print_status(self, w=None):
+        if w is None:
+            w = self.w
         if self.valid_features is not None:
-            biggest_weight_indices = torch.argsort(self.w, descending=True)[:len(self.valid_features)]
+            biggest_weight_indices = torch.argsort(w, descending=True)[:len(self.valid_features)]
             combined = torch.cat((biggest_weight_indices, self.valid_features))
             uniques, counts = combined.unique(return_counts=True)
             intersection = uniques[counts > 1]
@@ -140,7 +142,11 @@ class Optimizer:
             self.results_handler.add_result('loss', self.current_loss_value)
             self.results_handler.add_result('w_accuracy', w_accuracy)
             return w_accuracy
-            # log_debug('Weights : ', self.w)
+
+
+def show_heatmap(mat):
+    sns.heatmap(mat, cmap='Blues')
+    plt.show()
 
 
 class PCAFeatureExtraction(FeatureExtractionAlgorithm):
@@ -156,6 +162,8 @@ class PCAFeatureExtraction(FeatureExtractionAlgorithm):
         self.iterative = kwargs['iterative']
         self.epochs = kwargs['epochs']
         self.results_handler = kwargs['results_handler']
+        self.should_accumulate_w = kwargs['accumulating_w'] if self.iterative else False
+        self.easy_accumulation = kwargs['easy_accumulation'] if self.should_accumulate_w else False
         self.args = kwargs
 
     def get_relevant_features(self, X, amount=10):
@@ -193,45 +201,29 @@ class PCAFeatureExtraction(FeatureExtractionAlgorithm):
         if valid_features:
             valid_features = torch.arange(valid_features)
         self.w_optimizer = Optimizer(fake_B, fake_B, valid_features=valid_features, **self.args)
+        if self.easy_accumulation:
+            self.epochs = int(self.epochs / 10)
         if self.iterative:
             original_X = X.clone()
+            if self.should_accumulate_w:
+                accumulated_w = torch.ones((X.shape[1]))
             for i in range(self.epochs):
-                w = self.train(X, y, metadata, epochs=1)
-                X = w * original_X
-                self.w_optimizer.print_status(i)
+                if self.easy_accumulation:
+                    w = self.train(X, y, metadata, epochs=100)
+                else:
+                    w = self.train(X, y, metadata, epochs=1)
+                if self.should_accumulate_w:
+                    accumulated_w *= w
+                    accumulated_w /= torch.linalg.norm(accumulated_w, ord=self.norm)
+                    X = original_X * accumulated_w
+                    self.w_optimizer.print_status(accumulated_w)
+                    self.w_optimizer.w.data = torch.ones((X.shape[1]))
+                else:
+                    X = w * original_X
+                    self.w_optimizer.print_status(w)
+                X = X - torch.mean(X, dim=0)
         else:
             self.train(X, y, metadata, epochs=self.epochs)
-            self.w_optimizer.print_status(self.epochs)
-
-    # def only_train(self, X, y=None, metadata=None):
-    #     self.train(X, y, metadata)
-    #     results = {'starting_b': self.current_b_precent, 'starting_c': self.current_c_precent}
-    #     self.w_optimizer.EPOCHS = 99
-    #     w_accuracy = self.w_optimizer.print_status(100)
-    #     results['ending_b'] = self.current_b_precent
-    #     results['ending_c'] = self.current_c_precent
-    #     results['w'] = w_accuracy
-    #     return results
-    #
-    # def iterative_train(self, X, y=None, metadata=None):
-    #     # Calculates C each time and updates w
-    #     # First train
-    #     EPOCHS = 100
-    #     self.train(X, y, metadata)
-    #     self.w_optimizer.EPOCHS = 1
-    #     results = {'starting_b': self.current_b_precent, 'starting_c': self.current_c_precent}
-    #     original_X = X.clone()
-    #     for epoch in range(EPOCHS - 1):
-    #         w = self.train(X, y, metadata)
-    #         # Perform softmax on weights
-    #         X = w * original_X
-    #
-    #         # print(w)
-    #         w_accuracy = self.w_optimizer.print_status(epoch)
-    #     results['ending_b'] = self.current_b_precent
-    #     results['ending_c'] = self.current_c_precent
-    #     results['w'] = w_accuracy
-    #     return results
 
     def calculate_B_C(self, P, X, y):
         X = torch.unique(X, dim=0)
@@ -254,50 +246,16 @@ class PCAFeatureExtraction(FeatureExtractionAlgorithm):
         b_precent = torch.sum(y[left_indices[B_indices]] == y[right_indices[B_indices]]) / groups_size
         c_precent = torch.sum(y[left_indices[C_indices]] == y[right_indices[C_indices]]) / groups_size
 
+        b_ratio = torch.sum(B_grades) / groups_size
+        c_ratio = torch.sum(C_grades) / groups_size
         self.results_handler.add_result('b_precent', b_precent)
         self.results_handler.add_result('c_precent', c_precent)
-
-        log_debug('Same group precentage in B is {}'.format(b_precent))
-        log_debug('Same group precentage in C is {}'.format(c_precent))
+        self.results_handler.add_result('b_ratio', b_ratio)
+        self.results_handler.add_result('c_ratio', c_ratio)
+        # log_info('Same group precentage in B is {}'.format(b_precent))
+        log_info('Same group precentage in C is {}'.format(c_precent))
 
         return B, C
-
-    def calculate_B_C_fake_groups(self, X, y):
-        # Check if database file exists
-        if self.database_name and os.path.exists(self.database_name):
-            log_debug('Loading database from file')
-            B, C = torch.load(self.database_name)
-            return B, C
-
-        else:
-            log_debug('Creating fake groups by myself...')
-            n = X.shape[0]
-            pairs, left_y, right_y = self.get_pairs(X, X.shape[0], y)
-            # Validates I'm not taking from the same cluster
-
-            pairs = pairs[torch.randperm(pairs.shape[0])]
-            size = int(self.xi * n ** 2)
-            B = []
-            C = []
-            for i in range(n ** 2):
-                if i % 100000 == 0:
-                    log_debug(
-                        'Finished {} pairs, B is {}%, C is {}%'.format(i, len(B) * 100 / size, len(C) * 100 / size))
-                same_class = left_y[i] == right_y[i]
-                equal_vectors = torch.equal(pairs[i][0], pairs[i][1])
-                if not equal_vectors:
-                    if same_class and len(B) < size:
-                        B.append(pairs[i])
-                    elif not same_class and len(C) < size:
-                        C.append(pairs[i])
-                elif len(B) == size and len(C) == size:
-                    break
-            B = torch.stack(B, dim=0)
-            C = torch.stack(C, dim=0)
-            if self.database_name:
-                log_debug('Saving database to file', self.database_name)
-                torch.save((B, C), self.database_name)
-            return B, C
 
     def get_pairs(self, X, n, y):
 
