@@ -52,9 +52,9 @@ def save_data(X, y):
 def get_synthetic_dataset(seed=42, times=1, **kwargs):
     for i in range(times):
         np.random.seed(seed + i)
-        n_classes = kwargs['n_classes'] if 'n_classes' in kwargs else np.random.randint(2, 8)
-        min_points_per_class = 500
-        max_points_per_class = 1000
+        n_classes = kwargs['n_classes'] if 'n_classes' in kwargs else np.random.randint(2, 6)
+        min_points_per_class = 150
+        max_points_per_class = 250
         n_relevant_features = kwargs['n_relevant_features'] if 'n_relevant_features' in kwargs else np.random.randint(5,
                                                                                                                       100)
         n_false_feature = kwargs['n_false_feature'] if 'n_false_feature' in kwargs else np.random.randint(30, 400)

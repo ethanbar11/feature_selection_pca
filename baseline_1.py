@@ -1,17 +1,12 @@
-from torch import autograd
-import os
 import logging
 
-import numpy as np
 import seaborn as sns
 import matplotlib.pyplot as plt
+import sklearn
 import torch
 import torch.optim
-import sklearn.cluster
-from sklearn.metrics.cluster import normalized_mutual_info_score
-
-import datasets
-import synthetic_data_generator
+from sklearn.cluster import KMeans
+from sklearn.metrics import normalized_mutual_info_score
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 
@@ -31,11 +26,27 @@ def args_to_string(args):
 
 class FeatureExtractionAlgorithm:
     def __init__(self, **kwargs):
-        pass
+        self.feature_amount = kwargs['feature_amount']
+        self.results_handler = kwargs['results_handler']
 
     # Expecting X to be numpy array of size (n_samples, n_features)
     def get_relevant_features(self, X):
         raise NotImplementedError
+
+    def run_k_means(self, X, y):
+        for n_features in self.feature_amount:
+            NUM_OF_RUNS = 5
+            features = self.get_relevant_features(X, n_features)
+            n_clusters = len(torch.unique(y))
+            X_used = X[:, features]
+            accuracies = []
+            seed = 42
+            for i in range(NUM_OF_RUNS):
+                kmeans = KMeans(n_clusters=n_clusters, random_state=seed + i).fit(X_used.cpu())
+                y_pred = kmeans.labels_
+                mutual_info_score = normalized_mutual_info_score(y, y_pred)
+                accuracies.append(mutual_info_score)
+            self.results_handler.add_result('NMI', (n_features, torch.mean(torch.tensor(accuracies))))
 
     def train(self, *kwargs):
         pass
@@ -68,19 +79,38 @@ def calculate_compression_w(u, v, P, w):
     return outcome
 
 
+def get_pca(X, n_components, sacling=False, center=False, ):
+    # TODO: Notice there is a difference of <eps = 1e-7 between my PCA and numpy's
+    X = X.clone()
+    if center:
+        X = X - torch.mean(X, dim=0)
+    if sacling:
+        X = X / torch.std(X, dim=0)
+
+    cov = torch.cov(X.T)
+    eigenvalues, eigenvectors = torch.linalg.eig(cov)
+    eigenvalues, eigenvectors = eigenvalues.real, eigenvectors.real
+    eigenvalues, eigenvectors = eigenvalues[:n_components], eigenvectors[:, :n_components]
+    return eigenvectors
+
+
 class Optimizer:
     def __init__(self, B, C, **kwargs):
-        self.use_loss_B = kwargs['use_loss_B']
-        self.use_normalization = kwargs['use_normalization']
+        self.use_loss_ratio = kwargs['use_loss_ratio'] if 'use_loss_ratio' in kwargs else False
+        self.use_loss_C = kwargs['use_loss_C'] if 'use_loss_C' in kwargs else False
+        self.use_loss_B = kwargs['use_loss_B'] if 'use_loss_B' in kwargs else False
+        print('use_loss_C', self.use_loss_C)
+        print('use_loss_B', self.use_loss_B)
+        self.use_normalization = kwargs['use_normalization'] and not kwargs['accumulating_w']
         self.use_clamping = kwargs['use_clamping'] if 'use_clamping' in kwargs else True
         self.valid_features = kwargs['valid_features']
-        self.BATCH_SIZE = int(1e4)
+        self.BATCH_SIZE = int(5e4)
         self.LEARNING_RATE = kwargs['learning_rate']
         self.norm = kwargs['norm']
         self.results_handler = kwargs['results_handler']
-        self.set_vals(B, C, np.zeros((1, 1)))
+        self.set_vals(B, C, torch.zeros((1, 1)))
         log_debug("Starting to train w. Number of batches: ", len(self.B_batches))
-        self.w = torch.ones((B.shape[-1]), requires_grad=True)
+        self.w = torch.ones((B.shape[-1]), requires_grad=True, device=kwargs['device'])
         self.current_loss_value = None
         self.optimizer = torch.optim.SGD(params=[self.w], lr=self.LEARNING_RATE)
 
@@ -89,44 +119,45 @@ class Optimizer:
         self.B = B
         self.C = C
         self.P = P
+        # self.P = torch.abs(P)
         self.B_batches = torch.split(B, self.BATCH_SIZE, dim=0)
         self.C_batches = torch.split(C, self.BATCH_SIZE, dim=0)
 
-    def optimize_w(self, epochs):
+    def optimize_w_one_epoch(self, epochs):
         # B is a matrix of size (chi * n**2 , d)
         # w is a vector of size (d, 1)
         # P is a matrix of size (k, d)
         # Split B into batches of rows
-        for epoch in range(epochs):
 
-            for batch_b, batch_c in zip(self.B_batches, self.C_batches):
-                # Calculating the gradient of the loss function
-                # with respect to w
-                self.optimizer.zero_grad()
+        for batch_b, batch_c in zip(self.B_batches, self.C_batches):
+            # Calculating the gradient of the loss function
+            # with respect to w
+            self.optimizer.zero_grad()
 
-                u = batch_b[:, 0, :]
-                v = batch_b[:, 1, :]
-                u2 = batch_c[:, 0, :]
-                v2 = batch_c[:, 1, :]
-
+            u = batch_b[:, 0, :]
+            v = batch_b[:, 1, :]
+            u2 = batch_c[:, 0, :]
+            v2 = batch_c[:, 1, :]
+            loss = torch.tensor(0, dtype=torch.float32, device=self.w.device)
+            if self.use_loss_C:
                 loss_C = torch.mean(calculate_compression_w(u2, v2, self.P, self.w)) * (-1.0)
-                loss = loss_C
-                if self.use_loss_B:
-                    loss_B = torch.mean(calculate_compression_w(u, v, self.P, self.w))
-                    loss += loss_B
+                loss += loss_C
+            if self.use_loss_B:
+                loss_B = torch.mean(calculate_compression_w(u, v, self.P, self.w)) * (-1.0)
+                loss += loss_B
+            if self.use_loss_ratio:
+                loss_B = torch.mean(calculate_compression_w(u, v, self.P, self.w))
+                loss_C = torch.mean(calculate_compression_w(u2, v2, self.P, self.w))
+                loss_ratio = (loss_C / loss_B) * (-1.0)
+                loss += loss_ratio
 
-                loss.backward()
-                self.current_loss_value = loss.item()
-                self.optimizer.step()
-                if self.use_normalization:
-                    # Normalization of 2 order
-                    self.w.data = self.w.data / torch.linalg.norm(self.w.data, ord=self.norm)
-                    # Softmax normalization
-                    # self.w.data = torch.nn.functional.softmax(self.w.data, dim=0)
-                if self.use_clamping:
-                    self.w.data = torch.clamp(self.w.data, min=0.0, max=1.0)
-                if epoch != 0:
-                    self.print_status()
+            loss.backward()
+            self.current_loss_value = loss.item()
+            self.optimizer.step()
+            if self.use_normalization:
+                self.w.data = self.w.data / torch.linalg.norm(self.w.data, ord=self.norm)
+            if self.use_clamping:
+                self.w.data = torch.clamp(self.w.data, min=0.0, max=1.0)
         return self.w.detach()
 
     def print_status(self, w=None):
@@ -149,6 +180,21 @@ def show_heatmap(mat):
     plt.show()
 
 
+class PCAStatistics(FeatureExtractionAlgorithm):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.n_components = kwargs['n_components']
+        self.results_handler = kwargs['results_handler']
+        self.feature_amount = kwargs['feature_amount'] if 'feature_amount' in kwargs else None
+        self.order = None
+        # Only for running on real data
+
+    def train_wrapper(self, X, y=None, metadata=None):
+        P = get_pca(X, self.n_components).T * (-1.0)
+        vals = torch.mean(torch.abs(P), dim=0)
+        self.order = torch.argsort(vals, descending=True)
+
+
 class PCAFeatureExtraction(FeatureExtractionAlgorithm):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -161,35 +207,50 @@ class PCAFeatureExtraction(FeatureExtractionAlgorithm):
         self.norm = kwargs['norm']
         self.iterative = kwargs['iterative']
         self.epochs = kwargs['epochs']
-        self.results_handler = kwargs['results_handler']
         self.should_accumulate_w = kwargs['accumulating_w'] if self.iterative else False
         self.easy_accumulation = kwargs['easy_accumulation'] if self.should_accumulate_w else False
+        self.device = kwargs['device'] if 'device' in kwargs else 'cpu'
+        self.pca_only_on_true_featuers = kwargs[
+            'pca_only_on_true_features'] if 'pca_only_on_true_features' in kwargs else False
+        self.test_on_k_means = kwargs['test_on_k_means'] if 'test_on_k_means' in kwargs else False
+        self.fake_groups = kwargs['use_fake_groups'] if 'use_fake_groups' in kwargs else False
         self.args = kwargs
+        # Only for running on real data
 
     def get_relevant_features(self, X, amount=10):
         return self.sorted_indices[:amount]
 
-    def train(self, X, y=None, metadata=None, epochs=1):
-        log_debug('Starting training on PCAFeatureExtraction')
-        # First stage - create all pairs of vectors
+    def train(self, X, y=None, metadata=None, epochs=1, direct_train=False):
+        if not direct_train:
+            log_debug('Starting training on PCAFeatureExtraction')
+            # First stage - create all pairs of vectors
 
-        # Second stage - For each pair - calculate compressibility ratio using PCA
-        log_debug('Calculating PCA for matrix sized : ', X.shape)
-        # TODO: Check what Lior said with not needing to subtract the mu
-        pca = sklearn.decomposition.PCA(n_components=self.n_components)
+            # Second stage - For each pair - calculate compressibility ratio using PCA
+            log_debug('Calculating PCA for matrix sized : ', X.shape)
+            if self.pca_only_on_true_featuers and metadata is not None:
+                X_orig = X.clone()
+                n_relevant_features = metadata['n_relevant_features'] if 'n_relevant_features' in metadata else None
+                non_valid = X.shape[-1] - n_relevant_features
+                mask = torch.cat((torch.ones((X.shape[0], n_relevant_features), device=self.device),
+                                  torch.zeros((X.shape[0], non_valid), device=self.device)), dim=1)
+                X = X * mask
+                P = get_pca(X, self.n_components).T * (-1.0)
+                X = X_orig
+            else:
+                P = get_pca(X, self.n_components).T * (-1.0)
+            log_debug('Finished calculating PCA')
 
-        pca.fit(X)
-        P = torch.from_numpy(pca.components_).float()  # Should be sized (n_components, n_features)
-        log_debug('Finished calculating PCA')
+            log_debug('Calculating B')
+            B, C = self.calculate_B_C(P, X, y)
+            log_debug('Finished calculating B, starting to calculate w')
+            # Third stage - create w and Perform SGD on w where the loss
+            # is -1 * mean(compressibility of batch)
 
-        log_debug('Calculating B')
-        B, C = self.calculate_B_C(P, X, y)
-        log_debug('Finished calculating B, starting to calculate w')
-        # Third stage - create w and Perform SGD on w where the loss
-        # is -1 * mean(compressibility of batch)
+            self.w_optimizer.set_vals(B, C, P)
 
-        self.w_optimizer.set_vals(B, C, P)
-        w = self.w_optimizer.optimize_w(epochs)
+        P = get_pca(X, self.n_components).T * (-1.0)
+        self.w_optimizer.P = P
+        w = self.w_optimizer.optimize_w_one_epoch(epochs)
 
         # Fourth stage - save w
         self.sorted_indices = torch.argsort(w, descending=True)
@@ -199,31 +260,42 @@ class PCAFeatureExtraction(FeatureExtractionAlgorithm):
         fake_B = torch.ones((1, 2, X.shape[1]))
         valid_features = metadata['n_relevant_features'] if 'n_relevant_features' in metadata else None
         if valid_features:
-            valid_features = torch.arange(valid_features)
+            valid_features = torch.arange(valid_features, device=self.device)
         self.w_optimizer = Optimizer(fake_B, fake_B, valid_features=valid_features, **self.args)
         if self.easy_accumulation:
             self.epochs = int(self.epochs / 10)
         if self.iterative:
             original_X = X.clone()
             if self.should_accumulate_w:
-                accumulated_w = torch.ones((X.shape[1]))
+                accumulated_w = torch.ones((X.shape[1]), device=self.device)
             for i in range(self.epochs):
                 if self.easy_accumulation:
                     w = self.train(X, y, metadata, epochs=100)
                 else:
-                    w = self.train(X, y, metadata, epochs=1)
+                    w = self.train(X, y, metadata, epochs=1,direct_train=True)
                 if self.should_accumulate_w:
                     accumulated_w *= w
                     accumulated_w /= torch.linalg.norm(accumulated_w, ord=self.norm)
                     X = original_X * accumulated_w
                     self.w_optimizer.print_status(accumulated_w)
-                    self.w_optimizer.w.data = torch.ones((X.shape[1]))
+                    self.w_optimizer.w.data = torch.ones((X.shape[1]), device=self.device)
                 else:
                     X = w * original_X
+                    print('Got here')
                     self.w_optimizer.print_status(w)
                 X = X - torch.mean(X, dim=0)
+                if i % 10 == 0:
+                    self.run_k_means(X, y)
+
         else:
-            self.train(X, y, metadata, epochs=self.epochs)
+            for epoch in range(self.epochs):
+                if epoch == 0:
+                    w = self.train(X, y, metadata, epochs=1, direct_train=False)
+                else:
+                    w = self.train(X, y, metadata, epochs=1, direct_train=True)
+                self.w_optimizer.print_status(w)
+                if epoch % 10 == 0:
+                    self.run_k_means(X, y)
 
     def calculate_B_C(self, P, X, y):
         X = torch.unique(X, dim=0)
@@ -235,8 +307,16 @@ class PCAFeatureExtraction(FeatureExtractionAlgorithm):
         v = X[right_indices]
         grades = calculate_compression(u, v, P)
         groups_size = int(self.xi * indices_pairs.shape[0])
-        B_grades, B_indices = torch.topk(grades, groups_size, largest=False)
-        C_grades, C_indices = torch.topk(grades, groups_size, largest=True)
+        if self.fake_groups:
+            # Getting "pure" B,C
+            y_left = y[left_indices]
+            y_right = y[right_indices]
+            indices_by_clusters = torch.eq(y_left, y_right).float()
+            B_grades, B_indices = torch.topk(indices_by_clusters, groups_size, largest=True)
+            C_grades, C_indices = torch.topk(indices_by_clusters, groups_size, largest=False)
+        else:
+            B_grades, B_indices = torch.topk(grades, groups_size, largest=False)
+            C_grades, C_indices = torch.topk(grades, groups_size, largest=True)
 
         log_debug('Finished calculating all grades')
         # Still second - Create B - the group of top xi pairs according to measure
@@ -252,7 +332,7 @@ class PCAFeatureExtraction(FeatureExtractionAlgorithm):
         self.results_handler.add_result('c_precent', c_precent)
         self.results_handler.add_result('b_ratio', b_ratio)
         self.results_handler.add_result('c_ratio', c_ratio)
-        # log_info('Same group precentage in B is {}'.format(b_precent))
+        log_info('Same group precentage in B is {}'.format(b_precent))
         log_info('Same group precentage in C is {}'.format(c_precent))
 
         return B, C
@@ -275,119 +355,3 @@ class PCAFeatureExtraction(FeatureExtractionAlgorithm):
 
     def __str__(self):
         return 'n={}, w_norm={}, loss_B={}'.format(self.n_components, self.use_normalization, self.use_loss_B)
-
-
-# Running k-means and returning accuracy based on algo.
-def run_algo(algo, X, y, seed=42, feature_amount=None):
-    NUM_OF_RUNS = 1
-    features = algo.get_relevant_features(X, feature_amount)
-    n_clusters = len(torch.unique(y))
-    X_used = X[:, features]
-    accuracies = []
-    for i in range(NUM_OF_RUNS):
-        kmeans = sklearn.cluster.KMeans(n_clusters=n_clusters, random_state=seed + i).fit(X_used)
-        y_pred = kmeans.labels_
-        mutual_info_score = normalized_mutual_info_score(y, y_pred)
-        accuracies.append(mutual_info_score)
-    return torch.mean(torch.tensor(accuracies))
-
-
-def run_synthetic_experiment():
-    n_components = 5
-    times = 1
-    seed = 42
-    torch.manual_seed(seed)
-    results = []
-    names = ['L1', 'L2', 'No_norm']
-    for i in range(times):
-        X, y, name, metadata = synthetic_data_generator.get_synthetic_dataset(seed + i)
-        first_algo = PCAFeatureExtraction(n_components=n_components, use_normalization=True, use_loss_B=False, norm=1)
-        second_algo = PCAFeatureExtraction(n_components=n_components, use_normalization=True, use_loss_B=False, norm=2)
-        third_algo = PCAFeatureExtraction(n_components=n_components, use_normalization=False, use_loss_B=False)
-        # algos = [first_algo, second_algo, third_algo]
-        # for algo, name in zip(algos, names):
-        #     print('Testing vs metadata', metadata)
-        #     result =algo.only_train(X, y, metadata)
-        #     result['metadata'] = metadata
-        #     result['name'] = name
-        #     result['type'] = 'regular'
-        #     results.append(result)
-        #     print('Finished iteration {} with algo : {}'.format(i, name))
-        #     print(results[i])
-        #
-        # first_algo = PCAFeatureExtraction(n_components=n_components, use_normalization=True, use_loss_B=False, norm=1)
-        # second_algo = PCAFeatureExtraction(n_components=n_components, use_normalization=True, use_loss_B=False, norm=2)
-        # third_algo = PCAFeatureExtraction(n_components=n_components, use_normalization=False, use_loss_B=False)
-        # algos = [first_algo, second_algo, third_algo]
-
-        for algo, name in zip(algos, names):
-            print('Testing vs metadata', metadata)
-            result = algo.iterative_train(X, y, metadata)
-            result['metadata'] = metadata
-            result['name'] = name
-            result['type'] = 'iterative'
-            results.append(result)
-            print('Finished iteration {} with algo : {}'.format(i, name))
-            print(results[i])
-    print('Finished all iterations')
-    print(results)
-    # Saving results
-    with open('.//sync//results3.pickle', 'wb') as f:
-        import pickle
-        pickle.dump(results, f)
-
-
-if __name__ == '__main__':
-    run_synthetic_experiment()
-    exit()
-    n_components = 5
-    feature_amount = 100
-    seed = 42
-    torch.manual_seed(seed)
-
-    algos = [Baseline()]
-    # with_loss_B_with_normalization = PCAFeatureExtraction(n_components)
-    # with_loss_B_with_normalization.use_loss_B = True
-    # with_loss_B_with_normalization.use_normalization = True
-    # without_loss_B_with_normalization = PCAFeatureExtraction(n_components)
-    # without_loss_B_with_normalization.use_loss_B = False
-    # without_loss_B_with_normalization.use_normalization = True
-    # with_loss_B_without_normalization = PCAFeatureExtraction(n_components)
-    # with_loss_B_without_normalization.use_loss_B = True
-    # with_loss_B_without_normalization.use_normalization = False
-    #
-    # without_loss_B_without_normalization = PCAFeatureExtraction(n_components)
-    # without_loss_B_without_normalization.use_loss_B = False
-    # without_loss_B_without_normalization.use_normalization = False
-
-    algo = PCAFeatureExtraction(n_components, use_normalization=True, use_loss_B=False)
-
-    algos = [algo]
-
-    with autograd.detect_anomaly():
-        # Defining params
-        log_debug('Starting to test algos : ', algos)
-        for X, y, name, metadata in datasets.read_datasets():
-            feature_jump = 10
-            log_debug('Starting to test on dataset {}'.format(name))
-            log_debug('X shape is {}'.format(X.shape))
-            for algo in algos:
-                log_debug('Starting to test algo : ', algo)
-                algo.database_name = './/fake_b_c_datasets//{}.pt'.format(name)
-                log_debug('Starting to test algo {} on dataset {}'.format(algo, name))
-                algo.iterative_train(X, y, metadata)
-            # amounts = [i for i in range(feature_jump, min(200, X.shape[-1]), feature_jump)]
-            # results = []
-            # for feature_amount in amounts:
-            #     result = run_algo(algo, X, y, feature_amount=feature_amount)
-            #     results.append(result)
-            # results = torch.tensor(results)
-        #     log_debug("\n\n==============")
-        #     log_debug('Max result is {} in index {}'.format((torch.argmax(results) + 1) * 20, torch.max(results) * 100))
-        #     log_debug("==============\n\n")
-        #
-        #     # Plotting results
-        #     plt.plot(amounts, results, label=algo.__str__())
-        # plt.legend()
-        # plt.title('Dataset {}'.format(name))
-        # plt.show()
