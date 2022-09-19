@@ -1,42 +1,52 @@
+from ResultsHandler import SyntheticResultHandler, RealResultsHandler
 from common import *
 
 from datasets import read_datasets
-from baseline_1 import *
+from pca_feature_selection import *
 
 import torch
 
+algos = {
+    'PCAFeatureExtraction': PCAFeatureExtraction,
+    'IterativePCAFeatureExtraction': IterativePCAFeatureExtraction,
+}
 
-def pca_algorithms_creation(configurations):
+
+def pca_algorithms_creation(X, y=None, meta=None, configurations=None):
     algorithms = []
     for configuration in configurations:
-        algorithms.append(PCAFeatureExtraction(**configuration))
+        algo_class = algos[configuration['algo class']]
+        algorithms.append(algo_class(X, y, meta, **configuration))
     return algorithms
 
 
 def experiment():
     path = './/results//results_real_datasets.pickle'
-    dataset_name = 'real'
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-    algo_configs = testings
+    dataset_name = 'synthetic'
+    device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
+    print('Running on device: ', device)
+    algo_configs = [debugging_config]
     dataset_config = hard_synthetic_dataset_config_small_feature_amount
-    finishing_config = plot_over_time_k_means_nmi
+    results_handler = SyntheticResultHandler(device)
 
+    finish_func = lambda: print('Woho')
     # Times to perform the experiment repeatably.
-    for config in algo_configs:
-        config['results_handler'] = results_handler
-        config['device'] = device
+    for algo_config in algo_configs:
+        algo_config['results_handler'] = results_handler
+        algo_config['device'] = device
 
-    algorithms = pca_algorithms_creation(algo_configs)
     for X, y, name, meta in read_datasets(dataset_name, **dataset_config):
         X = X.to(device)
-        for config, algorithm in zip(algo_configs, algorithms):
-            results_handler.start_new_experiment(name, config['algo name'])
-            results_handler.add_result('meta dataset', meta)
-            print('Running algorithm {} on dataset {}'.format(algorithm, name))
-            algorithm.train_wrapper(X, y, meta)
-            print(results_handler.current_experiment)
-
-    finishing_config['function'](**finishing_config)
+        algorithms = pca_algorithms_creation(X, y, meta, algo_configs)
+        results_handler.set_dataset_name(name, X, y, meta)
+        for algo_config, algorithm in zip(algo_configs, algorithms):
+            print('Running algorithm {} on dataset {}'.format(algo_config['algo name'], name))
+            results_handler.set_algo(algo_config['algo name'])
+            algorithm.train()
+            # max_result = results_handler.get_max_result()
+            # print('Finished algorithm {} on dataset {}, max result is :{}'.format(algo_config['algo name'], name,
+            #                                                                       max_result))
+    finish_func()
 
 
 if __name__ == '__main__':
