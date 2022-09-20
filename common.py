@@ -21,7 +21,7 @@ def run_algo(algo, X, y, seed=42, feature_amount=None):
 
 # Algo Configs
 
-default_algo_config = {'n_components': 4,
+default_algo_config = {'n_components': 7,
                        'use_loss_B': False,
                        'use_normalization': True,
                        'accumulating_w': False,
@@ -29,20 +29,24 @@ default_algo_config = {'n_components': 4,
                        'xi': 0.01,
                        'iterative': False,
                        'learning_rate': 0.3,
-                       'epochs': 100,
+                       'epochs': 200,
                        'pca_only_on_true_features': False,
                        'algo name': 'Default',
+                       'use_clamping': False,
                        'algo class': 'PCAFeatureExtraction'}
 
 debugging_config = default_algo_config.copy()
 debugging_config['use_fake_groups'] = True
-debugging_config['pca_only_on_true_features'] = True
-debugging_config['use_loss_C'] = False
+debugging_config['pca_only_on_true_features'] = False
 debugging_config['use_loss_B'] = False
+debugging_config['use_loss_C'] = True
 debugging_config['use_loss_ratio'] = True
+debugging_config['normalize_data'] = True
 debugging_config['use_normalization'] = False
+debugging_config['use_clamping'] = False
 debugging_config['algo name'] = 'Only C Loss'
 debugging_config['algo class'] = 'PCAFeatureExtraction'
+debugging_config['update_P'] = False
 
 testings = []
 testing_basic_config = default_algo_config.copy()
@@ -51,12 +55,14 @@ testing_basic_config['pca_only_on_true_features'] = False
 testing_basic_config['iterative'] = False
 testing_basic_config['use_loss_C'] = True
 testing_basic_config['use_loss_B'] = False
+testing_basic_config['normalize_data'] = True
 testing_basic_config['use_loss_ratio'] = True
+
 testing_basic_config['use_normalization'] = False
 testing_basic_config['algo name'] = 'Only C Loss'
 testing_basic_config['update_P'] = True
 
-for n_components in [5, 10, 50, 80]:
+for n_components in [5, 10, 50, 80, 120, 150]:
     for use_loss_ratio in [True, False]:
         testing_basic_config = testing_basic_config.copy()
         testing_basic_config['n_components'] = n_components
@@ -70,12 +76,12 @@ default_synthetic_dataset_config = {'seed': 42, 'times': 1}
 
 hard_synthetic_dataset_config = default_synthetic_dataset_config.copy()
 hard_synthetic_dataset_config['times'] = 1
-hard_synthetic_dataset_config['SD'] = 0.01
-hard_synthetic_dataset_config['n_classes'] = 3
+hard_synthetic_dataset_config['SD'] = 0.2
+hard_synthetic_dataset_config['n_classes'] = 2
 
 hard_synthetic_dataset_config_small_feature_amount = hard_synthetic_dataset_config.copy()
 hard_synthetic_dataset_config_small_feature_amount['n_relevant_features'] = 10
-hard_synthetic_dataset_config_small_feature_amount['n_false_feature'] = 10
+hard_synthetic_dataset_config_small_feature_amount['n_false_feature'] = 50
 
 real_datasets = {}
 

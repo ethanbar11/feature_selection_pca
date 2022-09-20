@@ -8,7 +8,7 @@ import synthetic_data_generator
 def mat_database(**kwargs):
     normalize = kwargs['normalize'] if 'normalize' in kwargs else True
     files = list(filter(lambda x: x.endswith('.mat'), os.listdir('datasets')))
-    for file in files[-3:-1]:
+    for file in files[-3:-2]:
         data = scipy.io.loadmat('.//datasets//' + file)
 
         X, y = torch.from_numpy(data['X'].astype(np.float32)).float(), torch.from_numpy(data['Y']).flatten()

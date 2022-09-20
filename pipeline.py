@@ -30,6 +30,7 @@ def experiment():
     results_handler = SyntheticResultHandler(device)
 
     finish_func = lambda: print('Woho')
+    # finish_func = lambda: results_handler.save_results('.//results.pickle')
     # Times to perform the experiment repeatably.
     for algo_config in algo_configs:
         algo_config['results_handler'] = results_handler

@@ -2,7 +2,7 @@ import logging
 
 import torch
 import torch.optim
-
+from misc import show_heatmap
 from algorithms import FeatureExtractionAlgorithm
 from misc import log_debug, get_pca, log_info
 
@@ -22,13 +22,20 @@ def calculate_compression_w(u, v, P, w):
     return outcome
 
 
+def calculate_ratio_compression(u, v, u2, v2, w, P):
+    diff1 = torch.matmul(w * (u - v), P.T)
+    diff2 = torch.matmul(w * (u2 - v2), P.T)
+    outcome = torch.linalg.norm(diff2, dim=1) - torch.linalg.norm(diff1, dim=1)
+    return outcome
+
+
 class Optimizer:
     def __init__(self, B, C, **kwargs):
         self.use_loss_ratio = kwargs['use_loss_ratio'] if 'use_loss_ratio' in kwargs else False
         self.use_loss_C = kwargs['use_loss_C'] if 'use_loss_C' in kwargs else False
         self.use_loss_B = kwargs['use_loss_B'] if 'use_loss_B' in kwargs else False
         self.use_normalization = kwargs['use_normalization'] and not kwargs['accumulating_w']
-        self.use_clamping = kwargs['use_clamping'] if 'use_clamping' in kwargs else True
+        self.use_clamping = kwargs['use_clamping'] if 'use_normalization' in kwargs else True
         # self.valid_features = kwargs['valid_features']
         self.BATCH_SIZE = int(5e3)
         self.LEARNING_RATE = kwargs['learning_rate']
@@ -69,11 +76,12 @@ class Optimizer:
             loss_B = calculate_compression_w(u, v, self.P, self.w)
             loss_C = calculate_compression_w(u2, v2, self.P, self.w)
             if self.use_loss_C:
-                loss += torch.mean(loss_C) * (-1.0)
+                loss += torch.mean(loss_C) * (-10.0)
             if self.use_loss_B:
                 loss += torch.mean(loss_B)
             if self.use_loss_ratio:  # and self.current_epoch > 10:
-                # loss_ratio = (loss_B / loss_C)
+                loss_ratio = calculate_ratio_compression(u, v, u2, v2, self.w, self.P) * (-1.0)
+                # loss_ratio = (loss_B / loss_C) * (-1.0)
                 # loss_before_hinge = torch.cat(
                 #     ((loss_C - loss_B + m).unsqueeze(-1), torch.zeros(loss_B.shape[0], device=self.device)
                 #      .unsqueeze(-1)), dim=1)
@@ -98,6 +106,7 @@ class ClassicGroup:
         self.y = y
         self.metadata = metadata
         self.results_handler = kwargs['results_handler']
+        self.normalize_data = kwargs['normalize_data']
         self.n_components = kwargs['n_components']
         self.pca_only_on_true_featuers = kwargs['pca_only_on_true_features']
         self.device = kwargs['device']
@@ -132,6 +141,9 @@ class ClassicGroup:
 
     def calculate_B_C_P(self):
         X = torch.unique(self.X, dim=0)
+        if self.normalize_data:
+            X = X - torch.mean(X, dim=0)
+            X = X / torch.std(X, dim=0)
         indices_pairs = self.get_pairs(X, X.shape[0], self.y)
         left_indices = indices_pairs[:, 0]
         right_indices = indices_pairs[:, 1]
@@ -142,7 +154,7 @@ class ClassicGroup:
         grades = calculate_compression(u, v, P)
         groups_size = int(self.xi * indices_pairs.shape[0])
         B_grades, B_indices, C_grades, C_indices = self.get_B_C_grades_and_indices(grades, groups_size, left_indices,
-                                                                                   right_indices)
+                                                                                   right_indices, indices_pairs)
 
         log_debug('Finished calculating all grades')
         # Still second - Create B - the group of top xi pairs according to measure
@@ -161,14 +173,14 @@ class ClassicGroup:
 
         return B, C, P
 
-    def get_B_C_grades_and_indices(self, grades, groups_size, left_indices, right_indices):
+    def get_B_C_grades_and_indices(self, grades, groups_size, left_indices, right_indices, indices_pairs):
         B_grades, B_indices = torch.topk(grades, groups_size, largest=False)
         C_grades, C_indices = torch.topk(grades, groups_size, largest=True)
         return B_grades, B_indices, C_grades, C_indices
 
 
 class FakeBAndC(ClassicGroup):
-    def get_B_C_grades_and_indices(self, grades, groups_size, left_indices, right_indices):
+    def get_B_C_grades_and_indices(self, grades, groups_size, left_indices, right_indices, indices_pairs):
         y_left = self.y[left_indices]
         y_right = self.y[right_indices]
         indices_by_clusters = torch.eq(y_left, y_right).float()
@@ -181,7 +193,7 @@ class RatioGroup(ClassicGroup):
     def __init__(self, X, y=None, metadata=None, **kwargs):
         super().__init__(X, y, metadata, **kwargs)
 
-    def get_B_C_grades_and_indices(self, grades, groups_size, left_indices, right_indices):
+    def get_B_C_grades_and_indices(self, grades, groups_size, left_indices, right_indices, indices_pairs):
         # TODO: Maybe add this as D and E groups.
         y_left = self.y[left_indices]
         y_right = self.y[right_indices]
@@ -234,7 +246,7 @@ class PCAFeatureExtraction(FeatureExtractionAlgorithm):
         self.w_optimizer.set_vals(B, C, P)
         w = torch.ones(self.X.shape[-1], device=self.device)
         for epoch in range(self.epochs):
-            if self.calculate_P_each_time and epoch %10 == 0:
+            if self.calculate_P_each_time and epoch % 10 == 0:
                 self.group_manager.update_X(self.X * w)
                 P = self.group_manager.calculate_P()
                 self.w_optimizer.set_vals(B, C, P)
