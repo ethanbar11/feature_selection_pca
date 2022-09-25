@@ -21,15 +21,15 @@ def run_algo(algo, X, y, seed=42, feature_amount=None):
 
 # Algo Configs
 
-default_algo_config = {'n_components': 7,
+default_algo_config = {'n_components': 5,
                        'use_loss_B': False,
                        'use_normalization': True,
                        'accumulating_w': False,
-                       'norm': 1,
+                       'norm': 2,
                        'xi': 0.01,
                        'iterative': False,
-                       'learning_rate': 0.3,
-                       'epochs': 200,
+                       'learning_rate': 0.1,
+                       'epochs': 500,
                        'pca_only_on_true_features': False,
                        'algo name': 'Default',
                        'use_clamping': False,
@@ -42,33 +42,34 @@ debugging_config['use_loss_B'] = False
 debugging_config['use_loss_C'] = True
 debugging_config['use_loss_ratio'] = True
 debugging_config['normalize_data'] = True
-debugging_config['use_normalization'] = False
+debugging_config['use_normalization'] = True
 debugging_config['use_clamping'] = False
 debugging_config['algo name'] = 'Only C Loss'
 debugging_config['algo class'] = 'PCAFeatureExtraction'
-debugging_config['update_P'] = False
+debugging_config['update_P'] = True
 
 testings = []
-testing_basic_config = default_algo_config.copy()
-testing_basic_config['use_fake_groups'] = True
-testing_basic_config['pca_only_on_true_features'] = False
-testing_basic_config['iterative'] = False
-testing_basic_config['use_loss_C'] = True
-testing_basic_config['use_loss_B'] = False
-testing_basic_config['normalize_data'] = True
-testing_basic_config['use_loss_ratio'] = True
+for k in [3, 5, 10, 20, 50, 100, 150, 200,300]:
+    config = debugging_config.copy()
+    config['n_components'] = k
+    only_ratio_loss = config.copy()
+    only_ratio_loss['use_loss_C'] = False
+    only_ratio_loss['use_loss_ratio'] = True
+    only_ratio_loss['algo name'] = 'Only Ratio Loss k={}'.format(k)
 
-testing_basic_config['use_normalization'] = False
-testing_basic_config['algo name'] = 'Only C Loss'
-testing_basic_config['update_P'] = True
+    only_c_loss = config.copy()
+    only_c_loss['use_loss_C'] = True
+    only_c_loss['use_loss_ratio'] = False
+    only_c_loss['algo name'] = 'Only C Loss k={}'.format(k)
 
-for n_components in [5, 10, 50, 80, 120, 150]:
-    for use_loss_ratio in [True, False]:
-        testing_basic_config = testing_basic_config.copy()
-        testing_basic_config['n_components'] = n_components
-        testing_basic_config['use_loss_ratio'] = use_loss_ratio
-        testing_basic_config['algo name'] = 'k={}, ratio={}'.format(n_components, use_loss_ratio)
-        testings.append(testing_basic_config)
+    both_c_loss_and_ratio = config.copy()
+    both_c_loss_and_ratio['use_loss_C'] = True
+    both_c_loss_and_ratio['use_loss_ratio'] = True
+    both_c_loss_and_ratio['algo name'] = 'Both C Loss and Ratio k={}'.format(k)
+
+    testings.append(only_ratio_loss)
+    testings.append(only_c_loss)
+    testings.append(both_c_loss_and_ratio)
 
 # Dataset Configs
 
@@ -76,12 +77,13 @@ default_synthetic_dataset_config = {'seed': 42, 'times': 1}
 
 hard_synthetic_dataset_config = default_synthetic_dataset_config.copy()
 hard_synthetic_dataset_config['times'] = 1
-hard_synthetic_dataset_config['SD'] = 0.2
+hard_synthetic_dataset_config['mu'] = 1
+hard_synthetic_dataset_config['SD'] = hard_synthetic_dataset_config['mu'] * 0.2
 hard_synthetic_dataset_config['n_classes'] = 2
 
 hard_synthetic_dataset_config_small_feature_amount = hard_synthetic_dataset_config.copy()
 hard_synthetic_dataset_config_small_feature_amount['n_relevant_features'] = 10
-hard_synthetic_dataset_config_small_feature_amount['n_false_feature'] = 50
+hard_synthetic_dataset_config_small_feature_amount['n_false_feature'] = 10
 
 real_datasets = {}
 

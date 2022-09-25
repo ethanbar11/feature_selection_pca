@@ -23,9 +23,11 @@ def calculate_compression_w(u, v, P, w):
 
 
 def calculate_ratio_compression(u, v, u2, v2, w, P):
-    diff1 = torch.matmul(w * (u - v), P.T)
-    diff2 = torch.matmul(w * (u2 - v2), P.T)
-    outcome = torch.linalg.norm(diff2, dim=1) - torch.linalg.norm(diff1, dim=1)
+    diff1_P = torch.matmul(w * (u - v), P.T)
+    diff1 = w * (u - v)
+    diff2_P = torch.matmul(w * (u2 - v2), P.T)
+    diff2 = w * (u2 - v2)
+    outcome = torch.linalg.norm(diff2_P, dim=1) - torch.linalg.norm(diff1_P, dim=1)
     return outcome
 
 
@@ -41,19 +43,21 @@ class Optimizer:
         self.LEARNING_RATE = kwargs['learning_rate']
         self.norm = kwargs['norm']
         self.results_handler = kwargs['results_handler']
+        self.current_epoch = 0
         self.set_vals(B, C, torch.zeros((1, 1)))
         log_debug("Starting to train w. Number of batches: ", len(self.B_batches))
         self.device = kwargs['device']
         self.w = torch.ones((B.shape[-1]), requires_grad=True, device=self.device)
         self.optimizer = torch.optim.SGD(params=[self.w], lr=self.LEARNING_RATE)
-        self.current_epoch = 0
+        self.initial_P = None
 
     # You have to call for set_vals before using.
     def set_vals(self, B, C, P):
         self.B = B
         self.C = C
         self.P = P
-        # self.P = torch.abs(P)
+        if self.current_epoch == 0:
+            self.initial_P = P
         self.B_batches = torch.split(B, self.BATCH_SIZE, dim=0)
         self.C_batches = torch.split(C, self.BATCH_SIZE, dim=0)
 
@@ -76,11 +80,11 @@ class Optimizer:
             loss_B = calculate_compression_w(u, v, self.P, self.w)
             loss_C = calculate_compression_w(u2, v2, self.P, self.w)
             if self.use_loss_C:
-                loss += torch.mean(loss_C) * (-10.0)
+                loss += torch.mean(loss_C) * (-1.0)
             if self.use_loss_B:
                 loss += torch.mean(loss_B)
             if self.use_loss_ratio:  # and self.current_epoch > 10:
-                loss_ratio = calculate_ratio_compression(u, v, u2, v2, self.w, self.P) * (-1.0)
+                loss_ratio = calculate_ratio_compression(u, v, u2, v2, self.w, self.initial_P) * (-1.0)
                 # loss_ratio = (loss_B / loss_C) * (-1.0)
                 # loss_before_hinge = torch.cat(
                 #     ((loss_C - loss_B + m).unsqueeze(-1), torch.zeros(loss_B.shape[0], device=self.device)
@@ -101,12 +105,12 @@ class Optimizer:
 
 class ClassicGroup:
     def __init__(self, X, y=None, metadata=None, **kwargs):
+        self.normalize_data = kwargs['normalize_data']
         self.xi = kwargs['xi']
         self.X = X
         self.y = y
         self.metadata = metadata
         self.results_handler = kwargs['results_handler']
-        self.normalize_data = kwargs['normalize_data']
         self.n_components = kwargs['n_components']
         self.pca_only_on_true_featuers = kwargs['pca_only_on_true_features']
         self.device = kwargs['device']
@@ -142,8 +146,8 @@ class ClassicGroup:
     def calculate_B_C_P(self):
         X = torch.unique(self.X, dim=0)
         if self.normalize_data:
-            X = X - torch.mean(X, dim=0)
-            X = X / torch.std(X, dim=0)
+            self.X = self.X - self.X.mean(dim=0)
+            self.X = self.X / self.X.std(dim=0)
         indices_pairs = self.get_pairs(X, X.shape[0], self.y)
         left_indices = indices_pairs[:, 0]
         right_indices = indices_pairs[:, 1]
@@ -206,9 +210,38 @@ class RatioGroup(ClassicGroup):
         return B_grades, B_indices, C_grades, C_indices
 
 
+class RatioGroupUVW(ClassicGroup):
+    def __init__(self, X, y=None, metadata=None, **kwargs):
+        super().__init__(X, y, metadata, **kwargs)
+
+    def get_B_C_grades_and_indices(self, grades, groups_size, left_indices, right_indices, indices_pairs):
+        # TODO: Maybe add this as D and E groups.
+        y_left = self.y[left_indices]
+        y_right = self.y[right_indices]
+        indices_by_clusters = torch.eq(y_left, y_right).to(self.device)
+        grades_equal = grades * indices_by_clusters
+        grades_equal[grades_equal == 0] = 2  # Above max threshold
+        grades_not_equal = grades * (~indices_by_clusters)
+        chunks = torch.chunk(grades_not_equal, self.X.shape[0], dim=0)
+        B_grades, B_indices = torch.topk(grades_equal, groups_size, largest=False)
+        indexes = indices_pairs[B_indices, 0]
+        C_indices = torch.zeros((B_indices.shape[0]))
+        for i in range(B_indices.shape[0]):
+            left_index = indexes[i]
+            chunk = chunks[left_index]
+            right_index = torch.argmax(chunk)
+            chunk[right_index] = 0
+            location = left_index * (self.X.shape[0] - 1) + right_index
+            C_indices[i] = location
+        C_indices = C_indices.long()
+        C_grades = grades[C_indices]
+        return B_grades, B_indices, C_grades, C_indices
+
+
 class PCAFeatureExtraction(FeatureExtractionAlgorithm):
     def __init__(self, X, y=None, metadata=None, **kwargs):
         super().__init__(**kwargs)
+        self.normalize_data = kwargs['normalize_data']
         self.calculate_P_each_time = kwargs['update_P'] if 'update_P' in kwargs else False
         self.w_optimizer = None
         self.n_components = kwargs['n_components']
@@ -222,6 +255,7 @@ class PCAFeatureExtraction(FeatureExtractionAlgorithm):
             'pca_only_on_true_features'] if 'pca_only_on_true_features' in kwargs else False
         self.fake_groups = kwargs['use_fake_groups'] if 'use_fake_groups' in kwargs else False
         self.args = kwargs
+
         self.X = X
         self.y = y
         self.metadata = metadata
@@ -243,12 +277,15 @@ class PCAFeatureExtraction(FeatureExtractionAlgorithm):
 
     def train(self):
         B, C, P = self.group_manager.calculate_B_C_P()
+
         self.w_optimizer.set_vals(B, C, P)
         w = torch.ones(self.X.shape[-1], device=self.device)
         for epoch in range(self.epochs):
-            if self.calculate_P_each_time and epoch % 10 == 0:
-                self.group_manager.update_X(self.X * w)
+            if self.calculate_P_each_time and epoch%5 == 0:
+                new_X = self.X * w
+                self.group_manager.update_X(new_X)
                 P = self.group_manager.calculate_P()
+
                 self.w_optimizer.set_vals(B, C, P)
             w = self.w_optimizer.optimize_w_one_epoch()
             if epoch % 2 == 0:

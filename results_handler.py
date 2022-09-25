@@ -132,3 +132,31 @@ class RealResultsHandler(ResultHandler):
                 ax.legend(loc='center left', bbox_to_anchor=(1, 0.5))
                 fig.show()
             print(max_value_over_dataset)
+
+    def print_experiments_by_feature_amount(self):
+        experiments_by_feature_amount = {}
+        for dataset_name, dataset_data in self.past_experiments_tot_data.items():
+            X = dataset_data['X'].cpu().clone().detach()
+            print('Plotting dataset: ', dataset_name)
+            algos = dataset_data['algos data']
+            experiments_by_feature_amount[dataset_name] = {}
+            max_value_over_dataset = (0, None)
+            for feature_amount in self.features_to_check:
+                print('Plotting feature amount: ', feature_amount)
+                max_value = 0
+                for algo_name, algo_data in algos.items():
+                    print('Calculating algo: ', algo_name)
+                    experiments_by_feature_amount[dataset_name][algo_name] = {}
+                    w_over_time = algo_data['w']
+                    nmi_scores = []
+                    for w in w_over_time:
+                        top_indices = torch.argsort(w, descending=True)[:feature_amount]
+                        nmi_score = run_kmeans(X, dataset_data['y'], top_indices)
+                        nmi_scores.append(nmi_score)
+                        max_value = max(max_value, max(nmi_scores))
+                title = dataset_name + ' feature amount: ' + str(feature_amount) + 'max: ' + "{:.3f}".format(
+                    float(max_value))
+                if max_value > max_value_over_dataset[0]:
+                    max_value_over_dataset = (max_value, title)
+                print(title)
+            print(max_value_over_dataset)

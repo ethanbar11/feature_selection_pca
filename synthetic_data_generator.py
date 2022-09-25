@@ -20,7 +20,7 @@ def create_data(n_classes, min_points_per_class,
         # Create the points for the class
         n_points = np.random.randint(min_points_per_class,
                                      max_points_per_class)
-        mu = np.random.rand(n_features) * (2 * initial_mu) - initial_mu  # random vector in [-2000,2000]
+        mu = np.random.rand(n_features) * (2 * initial_mu) - initial_mu  # random vector in [-mu*,mu]
         sigma = np.ones(n_features) * (np.random.rand() + 1) * SD  # random vector in [1,2]
         to_add_x = np.random.normal(mu, sigma, (n_points, n_features))
         to_add_y = np.ones(n_points) * i
@@ -58,7 +58,7 @@ def get_synthetic_dataset(seed=42, times=1, **kwargs):
         n_relevant_features = kwargs['n_relevant_features'] if 'n_relevant_features' in kwargs else np.random.randint(5,
                                                                                                                       100)
         n_false_feature = kwargs['n_false_feature'] if 'n_false_feature' in kwargs else np.random.randint(30, 400)
-        mu = 1
+        mu = kwargs['mu'] if 'mu' in kwargs else 1
         SD = kwargs['SD'] if 'SD' in kwargs else np.random.randint(1, 50) * 0.01
         # print('Creating data')
         # print(

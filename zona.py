@@ -19,7 +19,7 @@ import numpy as np
 #             cost_matrix[i, j] = 1 if y[i] == y[j] and y_pred[i] == y_pred[j] else 0
 #     row_ind, col_ind = linear_sum_assignment(cost_matrix, maximize=True)
 #     return np.sum(cost_matrix[row_ind, col_ind]) / y.shape[0]
-from ResultsHandler import RealResultsHandler
+from results_handler import RealResultsHandler
 
 if __name__ == '__main__':
     path = 'results//results.pickle'
